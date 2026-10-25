@@ -812,7 +812,7 @@ function onMsg(m) {
     case 'queued': S.net = 'ok'; go('quick'); return; case 'qtimeout': S.err = 'No opponent found yet. Try again or create a private game.'; go('home'); return; case 'qcancelled': return;
     case 'count': if (countTimer) clearInterval(countTimer); S.count = Math.ceil(m.ms / 1000); render(); countTimer = setInterval(() => { S.count--; if (S.count <= 0) { clearInterval(countTimer); countTimer = null; S.count = 0; } render(); }, 1000); return;
     case 'go': if (MATCH) { if (m.live && !started) { if (MATCH.role === 'host') { tx({ t: 'leave' }); endMatchLocal('The match was lost when the page reloaded.'); } else { const w = setInterval(() => { if (G()) { clearInterval(w); matchBegin(); } }, 100); } } return; } startMatch(m); return; case 'start': if (MATCH) matchBegin(); return;
-    case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', load_timeout: 'The match failed to load in time.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.', server_restart: 'The game server is restarting. Reconnecting…' }[m.why] || 'The game was closed.'; S.room = null; S.err = w;
+    case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', inactive_timeout: 'The match ended because a player was inactive for 5 minutes.', load_timeout: 'The match failed to load in time.', match_finished: 'The match has ended.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.', server_restart: 'The game server is restarting. Reconnecting…' }[m.why] || 'The game was closed.'; S.room = null; S.err = w;
       if (m.why === 'signed_in_elsewhere') { S.noRetry = true; S.net = 'denied'; S.netMsg = 'You signed in on another device. Press Retry to use this one instead.'; }   /* without this, two devices kick each other off forever */ if (MATCH) endMatchLocal(w); else go('home'); return; }
     case 'peer': matchPeer(m.on); S.msg = m.on ? '' : 'Opponent disconnected — waiting up to 30 s for them to return…'; if (S.room) render(); return;
     case 'err': S.err = m.msg || ('Error: ' + m.code); render(); return;
@@ -1070,6 +1070,10 @@ function gate(e) {                                                          /* w
   else if (!myTurn) e.stopImmediatePropagation();
 }
 function matchNet(on) { if (!MATCH) return; if (on) { S.noRetry = false; if (!started) tx({ t: 'loaded' }); } }
+function markMatchActivity(e) { if (!MATCH || !started || (e && e.isTrusted === false)) return; tx({ t: 'activity' }); }
+document.addEventListener('keydown', markMatchActivity, true);
+document.addEventListener('pointerdown', markMatchActivity, true);
+document.addEventListener('touchstart', markMatchActivity, {capture:true,passive:true});
 function matchPeer(on) { const g = G(); if (!MATCH || !g || !started) return; if (MATCH.role === 'host') g.paused = !on; banner(on ? 'Opponent reconnected' : 'Opponent disconnected — waiting…', on ? 'ok' : 'err', on ? 2500 : 30000); }
 function matchBegin() { if (started) { const g = G(); if (g) g.paused = false; return; } const g = G(); if (!g) return; started = true; g.paused = false; if (MATCH.role === 'host') hostLoop(); updatePossessionHud(); banner('Match started — good luck!', 'ok', 2500); }
 function endMatchLocal(why) { banner(why, 'err', 8000); ov.classList.add('on'); S.screen = 'result'; S.result = { winner: 'tie', score: G() ? G().score : [0, 0], reason: 'abandoned', recorded: false }; render(); }
