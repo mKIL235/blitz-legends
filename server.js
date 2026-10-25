@@ -58,7 +58,7 @@ function roomPublic(r){return {id:r.id,code:r.code,vis:r.vis,st:r.st,set:r.set,h
 function roomMsg(r){for(const p of [r.host,r.guest])if(p?.ws)send(p.ws,{t:'room',room:roomPublic(r),role:p.role});}
 function err(ws,code,msg){send(ws,{t:'err',code,msg});}
 function leave(ws,why='opponent_left'){const u=sockets.get(ws);if(!u)return;const r=u.room;if(r){if(r.startTimer){clearTimeout(r.startTimer);r.startTimer=null;}if(r.host?.ws===ws){if(r.guest){send(r.guest.ws,{t:'closed',why:'host_left'});const gu=sockets.get(r.guest.ws);if(gu)gu.room=null;}rooms.delete(r.id);}else if(r.guest?.ws===ws){r.guest=null;r.st='lobby';if(r.host.ws)send(r.host.ws,{t:'peer',on:false});roomMsg(r);}u.room=null;}sockets.delete(ws);}
-function startRoom(r){r.st='loading';r.id=r.id||uid();const m={id:r.id,host:{lg:r.host.team.lg,i:r.host.team.i},guest:{lg:r.guest.team.lg,i:r.guest.team.i},set:r.set};send(r.host.ws,{t:'go',...m,role:'host',live:false});send(r.guest.ws,{t:'go',...m,role:'guest',live:false});roomMsg(r);}
+function startRoom(r){r.st='loading';r.id=r.id||uid();r.host.loaded=false;r.guest.loaded=false;r.started=false;const m={id:r.id,host:{lg:r.host.team.lg,i:r.host.team.i},guest:{lg:r.guest.team.lg,i:r.guest.team.i},set:r.set};send(r.host.ws,{t:'go',...m,role:'host',live:false});send(r.guest.ws,{t:'go',...m,role:'guest',live:false});roomMsg(r);}
 function roomReady(r){
  if(!r)return;
  const ready=!!(r.host?.ready&&r.guest?.ready&&r.host.ws?.readyState===WebSocket.OPEN&&r.guest.ws?.readyState===WebSocket.OPEN);
@@ -90,7 +90,15 @@ wss.on('connection',(ws)=>{ws.isAlive=true;ws.on('pong',()=>ws.isAlive=true);ws.
  if(m.t==='settings'&&isHost&&r.st==='lobby'){r.set={...r.set,...m.set};r.host.ready=false;if(r.guest)r.guest.ready=false;roomMsg(r);return;}
  if(m.t==='ready'){if(r.st!=='lobby'&&r.st!=='countdown')return;const p=isHost?r.host:r.guest;if(!p)return;p.ready=!!m.on;roomReady(r);return;}
  if(m.t==='leave'){leave(ws);send(ws,{t:'closed',why:'host_left'});return;}
- if(m.t==='loaded'){if(peer?.ws)send(peer.ws,{t:'start'});return;}
+ if(m.t==='loaded'){
+  if(r.st!=='loading'||!r.host||!r.guest)return;
+  const p=isHost?r.host:r.guest;p.loaded=true;
+  if(!r.started&&r.host.loaded&&r.guest.loaded&&r.host.ws?.readyState===WebSocket.OPEN&&r.guest.ws?.readyState===WebSocket.OPEN){
+   r.started=true;r.st='playing';
+   send(r.host.ws,{t:'start'});send(r.guest.ws,{t:'start'});roomMsg(r);
+  }
+  return;
+ }
  if(m.t==='rl'){if(peer?.ws)send(peer.ws,{t:'rl',d:m.d});return;}
  if(m.t==='sc'){if(peer?.ws)send(peer.ws,{t:'score',team:m.team,pts:m.pts});return;}
  if(m.t==='final'){const score=Array.isArray(m.score)?m.score:[0,0];const rec={id:r.id,at:Date.now(),me:score[0],opp:score[1],opp_name:peer?.name||'Opponent',won:score[0]===score[1]?-1:score[0]>score[1]?1:0,verified:false,reason:'final',recorded:false};for(const p of [r.host,r.guest])if(p){const h=db.history[Object.values(db.users).find(x=>x.username===p.name)?.id]||[];h.unshift({...rec,opp_name:p===r.host?r.guest?.name:r.host.name,me:p===r.host?score[0]:score[1],opp:p===r.host?score[1]:score[0],won:score[0]===score[1]?-1:((p===r.host?score[0]>score[1]:score[1]>score[0])?1:0)});if(h.length>25)h.length=25;const pu=Object.values(db.users).find(x=>x.username===p.name);if(pu)db.history[pu.id]=h;}persist();send(ws,{t:'result',...rec});if(peer?.ws)send(peer.ws,{t:'result',...rec,me:score[1],opp:score[0],won:score[0]===score[1]?-1:score[1]>score[0]?1:0});rooms.delete(r.id);return;}
