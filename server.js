@@ -67,7 +67,7 @@ function closeRoom(r,why='opponent_left',notify=true){
  }
 }
 function leave(ws,why='opponent_left'){const u=sockets.get(ws);if(!u)return;const r=u.room;if(r){if(r.startTimer){clearTimeout(r.startTimer);r.startTimer=null;}if(r.loadTimer){clearTimeout(r.loadTimer);r.loadTimer=null;}const playing=r.st==='playing';const peer=r.host?.ws===ws?r.guest:r.host;if(playing){if(peer?.ws){send(peer.ws,{t:'closed',why:why==='timeout'?'inactive_timeout':'opponent_left'});const pu=sockets.get(peer.ws);if(pu)pu.room=null;}rooms.delete(r.id);}else if(r.host?.ws===ws){if(r.guest){send(r.guest.ws,{t:'closed',why:'host_left'});const gu=sockets.get(r.guest.ws);if(gu)gu.room=null;}rooms.delete(r.id);}else if(r.guest?.ws===ws){r.guest=null;r.st='lobby';if(r.host.ws)send(r.host.ws,{t:'peer',on:false});roomMsg(r);}u.room=null;}sockets.delete(ws);}
-function startRoom(r){r.st='loading';r.id=r.id||uid();r.host.loaded=false;r.guest.loaded=false;r.started=false;const m={id:r.id,host:{lg:r.host.team.lg,i:r.host.team.i},guest:{lg:r.guest.team.lg,i:r.guest.team.i},set:r.set};send(r.host.ws,{t:'go',...m,role:'host',live:false});send(r.guest.ws,{t:'go',...m,role:'guest',live:false});roomMsg(r);if(r.loadTimer)clearTimeout(r.loadTimer);r.loadTimer=setTimeout(()=>{if(rooms.has(r.id)&&r.st==='loading'&&(!r.host.loaded||!r.guest.loaded)){for(const p of [r.host,r.guest])if(p?.ws){send(p.ws,{t:'closed',why:'load_timeout'});const pu=sockets.get(p.ws);if(pu)pu.room=null;}rooms.delete(r.id);}},45000);}
+function startRoom(r){r.st='loading';r.id=r.id||uid();r.host.loaded=false;r.guest.loaded=false;r.started=false;r.tossChoice=null;const m={id:r.id,host:{lg:r.host.team.lg,i:r.host.team.i},guest:{lg:r.guest.team.lg,i:r.guest.team.i},set:r.set};send(r.host.ws,{t:'go',...m,role:'host',live:false});send(r.guest.ws,{t:'go',...m,role:'guest',live:false});roomMsg(r);if(r.loadTimer)clearTimeout(r.loadTimer);r.loadTimer=setTimeout(()=>{if(rooms.has(r.id)&&r.st==='loading'&&(!r.host.loaded||!r.guest.loaded)){for(const p of [r.host,r.guest])if(p?.ws){send(p.ws,{t:'closed',why:'load_timeout'});const pu=sockets.get(p.ws);if(pu)pu.room=null;}rooms.delete(r.id);}},45000);}
 function roomReady(r){
  if(!r)return;
  const ready=!!(r.host?.ready&&r.guest?.ready&&r.host.ws?.readyState===WebSocket.OPEN&&r.guest.ws?.readyState===WebSocket.OPEN);
@@ -86,7 +86,7 @@ function roomReady(r){
  },3000);
 }
 wss.on('connection',(ws)=>{ws.isAlive=true;ws.on('pong',()=>ws.isAlive=true);ws.on('message',raw=>{let m;try{m=JSON.parse(raw.toString());}catch{return err(ws,'bad_json','Invalid message.');}const u=sockets.get(ws);
- if(m.t==='auth'){const s=db.sessions[m.token],user=s&&Object.values(db.users).find(x=>x.id===s.uid);if(!user){send(ws,{t:'auth',ok:false,err:'bad_token'});return;}const old=[...sockets.entries()].find(([sock,x])=>x.user.id===user.id&&sock!==ws);let transferred=null;if(old){const [oldWs,oldState]=old;const r=oldState.room;const seat=r&&r.st==='loading'?(r.host?.ws===oldWs?r.host:r.guest?.ws===oldWs?r.guest:null):null;if(seat){/* GI.reload rebuilds the page and authenticates again to enter the match. Preserve this seat instead of treating the reload as a real departure. */transferred={room:r,seat,role:seat.role};seat.ws=ws;seat.loaded=false;oldState.room=null;sockets.delete(oldWs);try{oldWs.close(4001,'match page reload');}catch(e){}}else{send(oldWs,{t:'closed',why:'signed_in_elsewhere'});leave(oldWs,'signed_in_elsewhere');}}sockets.set(ws,{user,ws,room:transferred?.room||null,role:transferred?.role||null});if(transferred){if(transferred.room.host?.ws===ws)transferred.room.host.ws=ws;if(transferred.room.guest?.ws===ws)transferred.room.guest.ws=ws;roomMsg(transferred.room);}send(ws,{t:'auth',ok:true,name:user.username,role:transferred?.role||'player'});return;}
+ if(m.t==='auth'){const s=db.sessions[m.token],user=s&&Object.values(db.users).find(x=>x.id===s.uid);if(!user){send(ws,{t:'auth',ok:false,err:'bad_token'});return;}const old=[...sockets.entries()].find(([sock,x])=>x.user.id===user.id&&sock!==ws);if(old){send(old[0],{t:'closed',why:'signed_in_elsewhere'});leave(old[0],'signed_in_elsewhere');}sockets.set(ws,{user,ws,room:null,role:null});send(ws,{t:'auth',ok:true,name:user.username,role:'player'});return;}
  if(!u)return err(ws,'auth_required','Sign in first.');
  if(m.t==='ping'){send(ws,{t:'pong',ts:m.ts});return;}
  if(m.t==='create'){if(u.room)return err(ws,'already_in_room','Leave your current room first.');const id=uid(),r={id,code:code(5),vis:m.vis==='public'?'public':'private',st:'lobby',set:{q:300,time:'day',diff:1,chaos:1},host:{name:u.user.username,team:m.team||{lg:'nfl',i:0},ready:false,ws,role:'host'},guest:null,created:Date.now()};rooms.set(id,r);u.room=r;u.role='host';roomMsg(r);return;}
@@ -107,6 +107,17 @@ wss.on('connection',(ws)=>{ws.isAlive=true;ws.on('pong',()=>ws.isAlive=true);ws.
    r.started=true;r.st='playing';if(r.loadTimer){clearTimeout(r.loadTimer);r.loadTimer=null;}r.host.lastActivity=Date.now();r.guest.lastActivity=Date.now();
    send(r.host.ws,{t:'start'});send(r.guest.ws,{t:'start'});roomMsg(r);
   }
+  return;
+ }
+ if(m.t==='rl'&&m.d&&m.d.k==='toss'){
+  const choice=m.d.choice==='TAILS'?'TAILS':m.d.choice==='HEADS'?'HEADS':null;
+  if(!choice||r.st!=='playing'||r.tossChoice)return;
+  r.tossChoice={choice,role:isHost?'host':'guest',at:Date.now()};
+  const lock={k:'tossLock',choice,role:isHost?'host':'guest'};
+  if(r.host?.ws)send(r.host.ws,{t:'rl',d:lock});
+  if(r.guest?.ws)send(r.guest.ws,{t:'rl',d:lock});
+  if(!isHost&&r.host?.ws)send(r.host.ws,{t:'rl',d:{k:'toss',choice}});
+  const p=isHost?r.host:r.guest;if(p)p.lastActivity=Date.now();
   return;
  }
  if(m.t==='rl'){if(m.d&&(m.d.k==='inp'||m.d.k==='ui'||m.d.k==='snap'||m.d.k==='pnl')){const p=isHost?r.host:r.guest;if(p)p.lastActivity=Date.now();}if(peer?.ws)send(peer.ws,{t:'rl',d:m.d});return;}
