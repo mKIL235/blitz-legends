@@ -1,0 +1,10 @@
+{
+  "name": "blitz-legends-multiplayer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Blitz Legends game page and starter multiplayer server",
+  "main": "server.js",
+  "scripts": {"start": "node server.js"},
+  "engines": {"node": ">=20"},
+  "dependencies": {"express": "^4.21.2", "ws": "^8.18.0"}
+}
