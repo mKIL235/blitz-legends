@@ -1088,22 +1088,14 @@ function installGuest() {
     const g = G(), s = tgt; if (!g || !s || !started) return; const k = 1 - Math.exp(-dt * 18);
     g.phase = s.ph; g.qtr = s.q; g.clock = s.cl; g.score = s.sc.slice(); g.poss = s.po; g.userTeam = s.ut; g.los = s.los; g.down = s.dn; g.toGo = s.tg; g.ballTeam = s.bt; g.fx = s.fx; g.fz = s.fz; g.exc = s.ex; g.to = s.to; g.chal = s.ch; if (s.st) g.st = s.st;
     g.ctrl = byIx(s.ct); g.carrier = byIx(s.ca);
-    /* Guest visibility recovery: some browsers can retain hidden local player roots after the match reload. Reconcile all 22 regular players from the host snapshot instead of silently skipping hidden/missing-looking players. */
-    if (!Array.isArray(g.players)) g.players = [[], []];
-    for (let ti = 0; ti < 2; ti++) {
-      if (!Array.isArray(g.players[ti])) g.players[ti] = [];
-      const teamSnap = s.p[ti] || [];
-      teamSnap.forEach((a, i) => {
-        const p = g.players[ti][i]; if (!p || !p.o || !p.o.root) return;
-        const far = Math.abs(p.x - a[0]) + Math.abs(p.z - a[1]) > 6;
-        p.x += (a[0] - p.x) * (far ? 1 : k); p.z += (a[1] - p.z) * (far ? 1 : k);
-        p.vx = a[2]; p.vz = a[3]; p.yaw = a[4]; p.yawT = a[4];
-        p.state = a[5]; p.task = a[6]; p.jump = a[7]; p.carry = !!a[8]; p.sub = !!a[9];
-        /* Active players must be visible on the guest renderer; substitutes remain hidden. */
-        p.o.root.visible = !p.sub;
-        p.o.root.position.x = p.x; p.o.root.position.z = p.z;
-      });
-    }
+    s.p.forEach((t, ti) => t.forEach((a, i) => {
+      const p = g.players[ti][i];
+      if (!p) return;
+      const far = Math.abs(p.x - a[0]) + Math.abs(p.z - a[1]) > 6;
+      p.x += (a[0] - p.x) * (far ? 1 : k); p.z += (a[1] - p.z) * (far ? 1 : k);
+      p.vx = a[2]; p.vz = a[3]; p.yaw = a[4];
+      p.state = a[5]; p.task = a[6]; p.jump = a[7]; p.carry = !!a[8];
+    }));
     const b = D().ball, a = s.bl; b.x += (a[0] - b.x) * k; b.y += (a[1] - b.y) * k; b.z += (a[2] - b.z) * k; b.vx = a[3]; b.vy = a[4]; b.vz = a[5]; b.state = a[6]; b.holder = byIx(a[7]);
     if (g.phase === 'final' && !finalSent) { finalSent = true; setTimeout(() => tx({ t: 'final', score: [g.score[0], g.score[1]] }), 1200); }
   };
