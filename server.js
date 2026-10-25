@@ -57,8 +57,17 @@ function send(ws,obj){if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringi
 function roomPublic(r){return {id:r.id,code:r.code,vis:r.vis,st:r.st,set:r.set,host:{name:r.host.name,team:r.host.team,ready:r.host.ready,on:!!r.host.ws},guest:r.guest?{name:r.guest.name,team:r.guest.team,ready:r.guest.ready,on:!!r.guest.ws}:null};}
 function roomMsg(r){for(const p of [r.host,r.guest])if(p?.ws)send(p.ws,{t:'room',room:roomPublic(r),role:p.role});}
 function err(ws,code,msg){send(ws,{t:'err',code,msg});}
-function leave(ws,why='opponent_left'){const u=sockets.get(ws);if(!u)return;const r=u.room;if(r){if(r.startTimer){clearTimeout(r.startTimer);r.startTimer=null;}if(r.host?.ws===ws){if(r.guest){send(r.guest.ws,{t:'closed',why:'host_left'});const gu=sockets.get(r.guest.ws);if(gu)gu.room=null;}rooms.delete(r.id);}else if(r.guest?.ws===ws){r.guest=null;r.st='lobby';if(r.host.ws)send(r.host.ws,{t:'peer',on:false});roomMsg(r);}u.room=null;}sockets.delete(ws);}
-function startRoom(r){r.st='loading';r.id=r.id||uid();r.host.loaded=false;r.guest.loaded=false;r.started=false;const m={id:r.id,host:{lg:r.host.team.lg,i:r.host.team.i},guest:{lg:r.guest.team.lg,i:r.guest.team.i},set:r.set};send(r.host.ws,{t:'go',...m,role:'host',live:false});send(r.guest.ws,{t:'go',...m,role:'guest',live:false});roomMsg(r);}
+function clearRoomTimers(r){if(!r)return;if(r.startTimer){clearTimeout(r.startTimer);r.startTimer=null;}if(r.loadTimer){clearTimeout(r.loadTimer);r.loadTimer=null;}}
+function closeRoom(r,why='opponent_left',notify=true){
+ if(!r)return;clearRoomTimers(r);rooms.delete(r.id);
+ for(const p of [r.host,r.guest]){
+  if(!p)continue;
+  if(notify&&p.ws&&p.ws.readyState===WebSocket.OPEN)send(p.ws,{t:'closed',why});
+  const pu=p.ws&&sockets.get(p.ws);if(pu&&pu.room===r)pu.room=null;
+ }
+}
+function leave(ws,why='opponent_left'){const u=sockets.get(ws);if(!u)return;const r=u.room;if(r){if(r.startTimer){clearTimeout(r.startTimer);r.startTimer=null;}if(r.loadTimer){clearTimeout(r.loadTimer);r.loadTimer=null;}const playing=r.st==='playing';const peer=r.host?.ws===ws?r.guest:r.host;if(playing){if(peer?.ws){send(peer.ws,{t:'closed',why:why==='timeout'?'inactive_timeout':'opponent_left'});const pu=sockets.get(peer.ws);if(pu)pu.room=null;}rooms.delete(r.id);}else if(r.host?.ws===ws){if(r.guest){send(r.guest.ws,{t:'closed',why:'host_left'});const gu=sockets.get(r.guest.ws);if(gu)gu.room=null;}rooms.delete(r.id);}else if(r.guest?.ws===ws){r.guest=null;r.st='lobby';if(r.host.ws)send(r.host.ws,{t:'peer',on:false});roomMsg(r);}u.room=null;}sockets.delete(ws);}
+function startRoom(r){r.st='loading';r.id=r.id||uid();r.host.loaded=false;r.guest.loaded=false;r.started=false;const m={id:r.id,host:{lg:r.host.team.lg,i:r.host.team.i},guest:{lg:r.guest.team.lg,i:r.guest.team.i},set:r.set};send(r.host.ws,{t:'go',...m,role:'host',live:false});send(r.guest.ws,{t:'go',...m,role:'guest',live:false});roomMsg(r);if(r.loadTimer)clearTimeout(r.loadTimer);r.loadTimer=setTimeout(()=>{if(rooms.has(r.id)&&r.st==='loading'&&(!r.host.loaded||!r.guest.loaded)){for(const p of [r.host,r.guest])if(p?.ws){send(p.ws,{t:'closed',why:'load_timeout'});const pu=sockets.get(p.ws);if(pu)pu.room=null;}rooms.delete(r.id);}},45000);}
 function roomReady(r){
  if(!r)return;
  const ready=!!(r.host?.ready&&r.guest?.ready&&r.host.ws?.readyState===WebSocket.OPEN&&r.guest.ws?.readyState===WebSocket.OPEN);
@@ -89,21 +98,22 @@ wss.on('connection',(ws)=>{ws.isAlive=true;ws.on('pong',()=>ws.isAlive=true);ws.
  if(m.t==='team'){const p=r.host?.ws===ws?r.host:r.guest;p.team=m.team||p.team;roomMsg(r);return;}
  if(m.t==='settings'&&isHost&&r.st==='lobby'){r.set={...r.set,...m.set};r.host.ready=false;if(r.guest)r.guest.ready=false;roomMsg(r);return;}
  if(m.t==='ready'){if(r.st!=='lobby'&&r.st!=='countdown')return;const p=isHost?r.host:r.guest;if(!p)return;p.ready=!!m.on;roomReady(r);return;}
- if(m.t==='leave'){leave(ws);send(ws,{t:'closed',why:'host_left'});return;}
+ if(m.t==='leave'){const reason=r.st==='playing'?'opponent_left':(isHost?'host_left':'opponent_left');leave(ws,reason);send(ws,{t:'closed',why:reason});return;}
+ if(m.t==='activity'){const p=isHost?r.host:r.guest;if(p)p.lastActivity=Date.now();return;}
  if(m.t==='loaded'){
   if(r.st!=='loading'||!r.host||!r.guest)return;
   const p=isHost?r.host:r.guest;p.loaded=true;
   if(!r.started&&r.host.loaded&&r.guest.loaded&&r.host.ws?.readyState===WebSocket.OPEN&&r.guest.ws?.readyState===WebSocket.OPEN){
-   r.started=true;r.st='playing';
+   r.started=true;r.st='playing';if(r.loadTimer){clearTimeout(r.loadTimer);r.loadTimer=null;}r.host.lastActivity=Date.now();r.guest.lastActivity=Date.now();
    send(r.host.ws,{t:'start'});send(r.guest.ws,{t:'start'});roomMsg(r);
   }
   return;
  }
- if(m.t==='rl'){if(peer?.ws)send(peer.ws,{t:'rl',d:m.d});return;}
+ if(m.t==='rl'){if(m.d&&(m.d.k==='inp'||m.d.k==='ui'||m.d.k==='snap'||m.d.k==='pnl')){const p=isHost?r.host:r.guest;if(p)p.lastActivity=Date.now();}if(peer?.ws)send(peer.ws,{t:'rl',d:m.d});return;}
  if(m.t==='sc'){if(peer?.ws)send(peer.ws,{t:'score',team:m.team,pts:m.pts});return;}
- if(m.t==='final'){const score=Array.isArray(m.score)?m.score:[0,0];const rec={id:r.id,at:Date.now(),me:score[0],opp:score[1],opp_name:peer?.name||'Opponent',won:score[0]===score[1]?-1:score[0]>score[1]?1:0,verified:false,reason:'final',recorded:false};for(const p of [r.host,r.guest])if(p){const h=db.history[Object.values(db.users).find(x=>x.username===p.name)?.id]||[];h.unshift({...rec,opp_name:p===r.host?r.guest?.name:r.host.name,me:p===r.host?score[0]:score[1],opp:p===r.host?score[1]:score[0],won:score[0]===score[1]?-1:((p===r.host?score[0]>score[1]:score[1]>score[0])?1:0)});if(h.length>25)h.length=25;const pu=Object.values(db.users).find(x=>x.username===p.name);if(pu)db.history[pu.id]=h;}persist();send(ws,{t:'result',...rec});if(peer?.ws)send(peer.ws,{t:'result',...rec,me:score[1],opp:score[0],won:score[0]===score[1]?-1:score[1]>score[0]?1:0});rooms.delete(r.id);return;}
+ if(m.t==='final'){const score=Array.isArray(m.score)?m.score:[0,0];const rec={id:r.id,at:Date.now(),me:score[0],opp:score[1],opp_name:peer?.name||'Opponent',won:score[0]===score[1]?-1:score[0]>score[1]?1:0,verified:false,reason:'final',recorded:false};for(const p of [r.host,r.guest])if(p){const h=db.history[Object.values(db.users).find(x=>x.username===p.name)?.id]||[];h.unshift({...rec,opp_name:p===r.host?r.guest?.name:r.host.name,me:p===r.host?score[0]:score[1],opp:p===r.host?score[1]:score[0],won:score[0]===score[1]?-1:((p===r.host?score[0]>score[1]:score[1]>score[0])?1:0)});if(h.length>25)h.length=25;const pu=Object.values(db.users).find(x=>x.username===p.name);if(pu)db.history[pu.id]=h;}persist();send(ws,{t:'result',...rec});if(peer?.ws)send(peer.ws,{t:'result',...rec,me:score[1],opp:score[0],won:score[0]===score[1]?-1:score[1]>score[0]?1:0});closeRoom(r,'match_finished',false);return;}
  if(m.t==='invite'){err(ws,'feature_unavailable','Friend invites require the full social service. Share the room code instead.');return;}
  if(m.t==='friends_status'){send(ws,{t:'friends_status',list:[]});return;}
  });ws.on('close',()=>{leave(ws);});ws.on('error',()=>{});});
-setInterval(()=>{for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},25000);
+setInterval(()=>{for(const r of [...rooms.values()]){if(r.st!=='playing')continue;const now=Date.now();const stale=[r.host,r.guest].find(p=>!p||!p.ws||p.ws.readyState!==WebSocket.OPEN||now-(p.lastActivity||now)>5*60*1000);if(stale){closeRoom(r,(!stale.ws||stale.ws.readyState!==WebSocket.OPEN)?'opponent_left':'inactive_timeout',true);}}for(const ws of wss.clients){if(ws.isAlive===false){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},10000);
 server.listen(PORT,'0.0.0.0',()=>console.log(`Blitz Legends server listening on ${PORT}`));
