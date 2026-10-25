@@ -579,6 +579,7 @@ const LS = { get: k => { try { return localStorage.getItem(k); } catch (e) { ret
 const SS = { get: k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} }, del: k => { try { sessionStorage.removeItem(k); } catch (e) {} } };
 const S = { screen: 'home', user: null, name: null, ws: null, wsOK: false, room: null, role: null, net: 'idle', msg: '', err: '', busy: false, count: 0, rtt: null, friends: [], outgoing: [], terms: null, termsErr: '', acc: false, saved: false, code: '', held: null, fstat: {}, reqs: [], blocks: [], stats: null, hist: [], list: [], invites: [], result: null, sync: { st: 'idle', t: 0, n: 0 }, match: J(SS.get('bl_match'), null), pick: { lg: GI.s.lg, i: GI.s.a || 0 }, auth: { tab: 'login' } };
 const MATCH = S.match;
+let countTimer = null;
 if (!MATCH && LS.get('bl_prev_gi3d') !== null) {          /* an earlier online match was abandoned: put the player's own team selection back */
   const p = LS.get('bl_prev_gi3d'); LS.del('bl_prev_gi3d'); if (p) LS.set('gi3d', p); else LS.del('gi3d'); (GI.reload ? GI.reload() : location.reload()); return;
 }
@@ -806,10 +807,10 @@ function onMsg(m) {
       S.noRetry = false; S.wsOK = true; S.net = 'ok'; S.netMsg = ''; S.everOnline = true; connecting = false; attempts = 0; S.gaveUp = false; S.lastRx = Date.now(); dlog('ws', 'online'); S.name = m.name; if (m.role) S.role = m.role; clearInterval(pingT);
       const me = S.ws; pingT = setInterval(() => { if (!me || me.readyState !== 1) return; if (Date.now() - S.lastRx > 15000) return dropStale(me); S._p = Date.now(); tx({ t: 'ping', ts: S._p }); }, 5000);   /* heartbeat + stale-connection detection */ if (MATCH) matchNet(true); render(); return;
     case 'pong': S.rtt = Date.now() - m.ts; if (ov.classList.contains('on') && S.screen === 'settings') render(); return;
-    case 'room': S.room = m.room; if (m.role) S.role = m.role; if (S.screen !== 'lobby' && !MATCH) go('lobby'); else render(); autoLeague(); return;
+    case 'room': S.room = m.room; if (m.room?.st === 'lobby') { if (countTimer) clearInterval(countTimer); countTimer = null; S.count = 0; } if (m.role) S.role = m.role; if (S.screen !== 'lobby' && !MATCH) go('lobby'); else render(); autoLeague(); return;
     case 'matched': S.room = m.room; S.role = m.role; go('lobby'); return;
     case 'queued': S.net = 'ok'; go('quick'); return; case 'qtimeout': S.err = 'No opponent found yet. Try again or create a private game.'; go('home'); return; case 'qcancelled': return;
-    case 'count': S.count = Math.ceil(m.ms / 1000); render(); const iv = setInterval(() => { S.count--; if (S.count <= 0) clearInterval(iv); render(); }, 1000); return;
+    case 'count': if (countTimer) clearInterval(countTimer); S.count = Math.ceil(m.ms / 1000); render(); countTimer = setInterval(() => { S.count--; if (S.count <= 0) { clearInterval(countTimer); countTimer = null; S.count = 0; } render(); }, 1000); return;
     case 'go': if (MATCH) { if (m.live && !started) { if (MATCH.role === 'host') { tx({ t: 'leave' }); endMatchLocal('The match was lost when the page reloaded.'); } else { const w = setInterval(() => { if (G()) { clearInterval(w); matchBegin(); } }, 100); } } return; } startMatch(m); return; case 'start': if (MATCH) matchBegin(); return;
     case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', load_timeout: 'The match failed to load in time.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.', server_restart: 'The game server is restarting. Reconnecting…' }[m.why] || 'The game was closed.'; S.room = null; S.err = w;
       if (m.why === 'signed_in_elsewhere') { S.noRetry = true; S.net = 'denied'; S.netMsg = 'You signed in on another device. Press Retry to use this one instead.'; }   /* without this, two devices kick each other off forever */ if (MATCH) endMatchLocal(w); else go('home'); return; }
