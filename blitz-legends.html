@@ -1125,6 +1125,22 @@ function safeHTML(html) {                                      /* the host's bro
 }
 function matchRelay(d) {
   const g = G(); if (!g) return;
+  /* The guest's coin-toss panel is mirrored HTML, so its original button handlers do not exist.
+     Route a guest's choice to the host simulation, which owns the real match state. */
+  if (d.k === 'toss' && MATCH.role === 'host' && started && g.phase === 'toss') {
+    const wanted = d.choice === 'TAILS' ? 'TAILS' : 'HEADS';
+    const toss = $('toss'), buttons = toss ? [...toss.querySelectorAll('#tbtn button')] : [];
+    const button = buttons.find(b => b.textContent.trim().toUpperCase() === wanted);
+    if (button) { window.__BL_TOSS_CALLER = 'guest'; button.click(); }
+    return;
+  }
+  if (d.k === 'toss_action' && MATCH.role === 'host' && started && g.phase === 'toss' && window.__BL_TOSS_WINNER === 1) {
+    const wanted = d.choice === 'KICK' ? 'KICK' : d.choice === 'RECEIVE' ? 'RECEIVE' : '';
+    const toss = $('toss'), buttons = toss ? [...toss.querySelectorAll('#tbtn button')] : [];
+    const button = buttons.find(b => b.textContent.trim().toUpperCase() === wanted);
+    if (button) button.click();
+    return;
+  }
   if (d.k === 'snap' && MATCH.role === 'guest') { if (lastSnap && d.n <= lastSnap) return; lastSnap = d.n; tgt = d; updatePossessionHud(d); }
   else if (d.k === 'pnl' && MATCH.role === 'guest') {
     for (const id in d.m) { const e = $(id); if (e) { { const h = safeHTML(d.m[id][0]); if (e.innerHTML !== h) e.innerHTML = h; } e.classList.toggle('hide', !!d.m[id][1]); } }
@@ -1135,7 +1151,21 @@ function matchRelay(d) {
   else if (d.k === 'inp' && MATCH.role === 'host' && g.userTeam === 1 && started) { const ks = D().keys; if (typeof d.c !== 'string' || !/^[A-Za-z0-9]{1,12}$/.test(d.c)) return; const ev = new KeyboardEvent(d.e === 'd' ? 'keydown' : 'keyup', { code: d.c, key: d.c, bubbles: true, cancelable: true }); ev.__bl = true; window.dispatchEvent(ev); }
   else if (d.k === 'ui' && MATCH.role === 'host' && started && PANELS.includes(d.id) && g.userTeam === 1) { const e = $(d.id); if (!e) return; if (d.i === -2) e.click(); else { const bs = e.querySelectorAll('button'); if (bs[d.i]) bs[d.i].click(); } }
 }
-if (MATCH) window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(1000); } catch (e) {} });
+if (MATCH) {
+  /* Relay clicks from the guest's mirrored toss UI. The server forwards this to the host;
+     only the host's real game engine performs the toss and decides the kickoff. */
+  document.addEventListener('click', e => {
+    if (MATCH.role !== 'guest' || !started || !S.wsOK) return;
+    const button = e.target && e.target.closest ? e.target.closest('#toss #tbtn button') : null;
+    if (!button) return;
+    const choice = button.textContent.trim().toUpperCase();
+    if (choice !== 'HEADS' && choice !== 'TAILS' && choice !== 'RECEIVE' && choice !== 'KICK') return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    tx({ t: 'rl', d: choice === 'HEADS' || choice === 'TAILS' ? { k: 'toss', choice } : { k: 'toss_action', choice } });
+  }, true);
+  window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(1000); } catch (e) {} });
+}
 
 /* ---------- boot ---------- */
 GI.online = GI.online || false; window.BlitzOnline = { open: openOnline, state: S, safeHTML, diag: DIAG, retryDelay, MAX_ATTEMPTS };
@@ -6955,19 +6985,29 @@ function startToss(){
     startKickoff(rcv);
   };
   const call=(c)=>{
-    tb.innerHTML='';sub.textContent='The coin is in the air...';
+    /* The first valid click wins; immediately remove both choices to lock the call. */
+    if (!tb.querySelector('button')) return;
+    const caller = window.__BL_TOSS_CALLER === 'guest' ? 'GUEST' : 'HOST';
+    window.__BL_TOSS_CALLER = null;
+    const chosen = c === 'H' ? 'HEADS' : 'TAILS', opposite = c === 'H' ? 'TAILS' : 'HEADS';
+    const callerTeam = caller === 'GUEST' ? 1 : 0;
+    tb.innerHTML='';sub.textContent=caller+' called '+chosen+' — the other player is locked to '+opposite+'. The coin is in the air...';
     const heads=Math.random()<0.5;
     coin.style.transform='rotateY(1800deg)';
     setTimeout(()=>{
       coin.textContent=heads?'H':'T';
-      const res=heads?'HEADS':'TAILS',userWin=(c==='H')===heads;
-      if(userWin){
-        sub.textContent="It's "+res+'! '+home+' win the toss. Receive or kick?';
-        mkb('RECEIVE',()=>go(0,true));mkb('KICK',()=>go(0,false));
+      const res=heads?'HEADS':'TAILS',callerWon=(c==='H')===heads;
+      const winnerTeam = callerWon ? callerTeam : 1-callerTeam;
+      window.__BL_TOSS_WINNER = winnerTeam;
+      if(callerWon){
+        const winnerName = winnerTeam === 0 ? home : away;
+        sub.textContent="It's "+res+'! '+winnerName+' win the toss. Receive or kick?';
+        mkb('RECEIVE',()=>go(winnerTeam,true));mkb('KICK',()=>go(winnerTeam,false));
       }else{
         const rc=Math.random()<0.7;
-        sub.textContent="It's "+res+'. '+away+' win the toss and elect to '+(rc?'receive':'kick')+'.';
-        setTimeout(()=>go(1,rc),2300);
+        const winnerName = winnerTeam === 0 ? home : away;
+        sub.textContent="It's "+res+'. '+winnerName+' win the toss and elect to '+(rc?'receive':'kick')+'.';
+        setTimeout(()=>go(winnerTeam,rc),2300);
       }
     },2000);
   };
