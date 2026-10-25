@@ -579,6 +579,7 @@ const LS = { get: k => { try { return localStorage.getItem(k); } catch (e) { ret
 const SS = { get: k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} }, del: k => { try { sessionStorage.removeItem(k); } catch (e) {} } };
 const S = { screen: 'home', user: null, name: null, ws: null, wsOK: false, room: null, role: null, net: 'idle', msg: '', err: '', busy: false, count: 0, rtt: null, friends: [], outgoing: [], terms: null, termsErr: '', acc: false, saved: false, code: '', held: null, fstat: {}, reqs: [], blocks: [], stats: null, hist: [], list: [], invites: [], result: null, sync: { st: 'idle', t: 0, n: 0 }, match: J(SS.get('bl_match'), null), pick: { lg: GI.s.lg, i: GI.s.a || 0 }, auth: { tab: 'login' } };
 const MATCH = S.match;
+let countTimer = null;
 if (!MATCH && LS.get('bl_prev_gi3d') !== null) {          /* an earlier online match was abandoned: put the player's own team selection back */
   const p = LS.get('bl_prev_gi3d'); LS.del('bl_prev_gi3d'); if (p) LS.set('gi3d', p); else LS.del('gi3d'); (GI.reload ? GI.reload() : location.reload()); return;
 }
@@ -806,12 +807,12 @@ function onMsg(m) {
       S.noRetry = false; S.wsOK = true; S.net = 'ok'; S.netMsg = ''; S.everOnline = true; connecting = false; attempts = 0; S.gaveUp = false; S.lastRx = Date.now(); dlog('ws', 'online'); S.name = m.name; if (m.role) S.role = m.role; clearInterval(pingT);
       const me = S.ws; pingT = setInterval(() => { if (!me || me.readyState !== 1) return; if (Date.now() - S.lastRx > 15000) return dropStale(me); S._p = Date.now(); tx({ t: 'ping', ts: S._p }); }, 5000);   /* heartbeat + stale-connection detection */ if (MATCH) matchNet(true); render(); return;
     case 'pong': S.rtt = Date.now() - m.ts; if (ov.classList.contains('on') && S.screen === 'settings') render(); return;
-    case 'room': S.room = m.room; if (m.role) S.role = m.role; if (S.screen !== 'lobby' && !MATCH) go('lobby'); else render(); autoLeague(); return;
+    case 'room': S.room = m.room; if (m.room?.st === 'lobby') { if (countTimer) clearInterval(countTimer); countTimer = null; S.count = 0; } if (m.role) S.role = m.role; if (S.screen !== 'lobby' && !MATCH) go('lobby'); else render(); autoLeague(); return;
     case 'matched': S.room = m.room; S.role = m.role; go('lobby'); return;
     case 'queued': S.net = 'ok'; go('quick'); return; case 'qtimeout': S.err = 'No opponent found yet. Try again or create a private game.'; go('home'); return; case 'qcancelled': return;
-    case 'count': S.count = Math.ceil(m.ms / 1000); render(); const iv = setInterval(() => { S.count--; if (S.count <= 0) clearInterval(iv); render(); }, 1000); return;
+    case 'count': if (countTimer) clearInterval(countTimer); S.count = Math.ceil(m.ms / 1000); render(); countTimer = setInterval(() => { S.count--; if (S.count <= 0) { clearInterval(countTimer); countTimer = null; S.count = 0; } render(); }, 1000); return;
     case 'go': if (MATCH) { if (m.live && !started) { if (MATCH.role === 'host') { tx({ t: 'leave' }); endMatchLocal('The match was lost when the page reloaded.'); } else { const w = setInterval(() => { if (G()) { clearInterval(w); matchBegin(); } }, 100); } } return; } startMatch(m); return; case 'start': if (MATCH) matchBegin(); return;
-    case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', load_timeout: 'The match failed to load in time.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.', server_restart: 'The game server is restarting. Reconnecting…' }[m.why] || 'The game was closed.'; S.room = null; S.err = w;
+    case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', inactive_timeout: 'The match ended because a player was inactive for 5 minutes.', load_timeout: 'The match failed to load in time.', match_finished: 'The match has ended.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.', server_restart: 'The game server is restarting. Reconnecting…' }[m.why] || 'The game was closed.'; S.room = null; S.err = w;
       if (m.why === 'signed_in_elsewhere') { S.noRetry = true; S.net = 'denied'; S.netMsg = 'You signed in on another device. Press Retry to use this one instead.'; }   /* without this, two devices kick each other off forever */ if (MATCH) endMatchLocal(w); else go('home'); return; }
     case 'peer': matchPeer(m.on); S.msg = m.on ? '' : 'Opponent disconnected — waiting up to 30 s for them to return…'; if (S.room) render(); return;
     case 'err': S.err = m.msg || ('Error: ' + m.code); render(); return;
@@ -1041,6 +1042,21 @@ function startMatch(m) {                                                   /* se
 function leaveMatchPage() { SS.del('bl_match'); const p = LS.get('bl_prev_gi3d'); if (p !== null) { if (p) LS.set('gi3d', p); else LS.del('gi3d'); LS.del('bl_prev_gi3d'); } if (S.ws) { S.noRetry = true; try { S.ws.close(); } catch (e) {} } (GI.reload ? GI.reload() : location.reload()); }
 let started = false, seq = 0, lastSnap = null, tgt = null, lastPoss = -1, lastScore = [0, 0], finalSent = false, hostBooted = false, panelsSig = '';
 const PANELS = ['select', 'subp', 'snapbar', 'coachTop', 'side'];
+let possHud = null;
+function ensurePossessionHud() {
+  if (!MATCH || possHud) return;
+  possHud = document.createElement('div'); possHud.id = 'bl-live-possession';
+  possHud.style.cssText = 'position:fixed;z-index:9998;top:12px;left:50%;transform:translateX(-50%);padding:8px 14px;border:1px solid rgba(255,255,255,.35);border-radius:999px;background:rgba(5,12,25,.86);color:#fff;font:800 12px/1.2 system-ui,sans-serif;letter-spacing:.08em;text-align:center;pointer-events:none;box-shadow:0 4px 18px rgba(0,0,0,.35);max-width:90vw;white-space:nowrap;';
+  document.body.appendChild(possHud);
+}
+function updatePossessionHud(snapshot) {
+  if (!MATCH) return; ensurePossessionHud();
+  const g = G(), team = snapshot ? snapshot.bt : (g && g.ballTeam);
+  const localTeam = MATCH.role === 'host' ? 0 : 1;
+  const yours = team === localTeam;
+  possHud.textContent = team === localTeam ? '🏈 YOUR TEAM HAS THE BALL' : '🏈 OPPONENT HAS THE BALL';
+  possHud.style.borderColor = yours ? '#7ee787' : '#ffcf70';
+}
 if (MATCH) {
   GI.online = true; GI.kgBlock = e => !!(MATCH.role === 'host' && started && G() && G().userTeam === 1 && e.isTrusted); { let prev = null; Object.defineProperty(GI, 'preStart', { configurable: true, get: () => o => { if (prev) prev(o); Object.assign(o, MATCH.set); GI.two = true; }, set: f => { prev = f; } }); }   /* chains after the game's own preStart hooks */                 /* host + guest share the engine's own 2-player turn model */
   const iv = setInterval(() => { const g = G(); if (!g) return; clearInterval(iv); g.paused = true; hostBooted = true; if (MATCH.role === 'guest') installGuest(); else installHost(); connect(); }, 50);
@@ -1054,8 +1070,12 @@ function gate(e) {                                                          /* w
   else if (!myTurn) e.stopImmediatePropagation();
 }
 function matchNet(on) { if (!MATCH) return; if (on) { S.noRetry = false; if (!started) tx({ t: 'loaded' }); } }
+function markMatchActivity(e) { if (!MATCH || !started || (e && e.isTrusted === false)) return; tx({ t: 'activity' }); }
+document.addEventListener('keydown', markMatchActivity, true);
+document.addEventListener('pointerdown', markMatchActivity, true);
+document.addEventListener('touchstart', markMatchActivity, {capture:true,passive:true});
 function matchPeer(on) { const g = G(); if (!MATCH || !g || !started) return; if (MATCH.role === 'host') g.paused = !on; banner(on ? 'Opponent reconnected' : 'Opponent disconnected — waiting…', on ? 'ok' : 'err', on ? 2500 : 30000); }
-function matchBegin() { started = true; const g = G(); g.paused = false; if (MATCH.role === 'host') hostLoop(); banner('Match started — good luck!', 'ok', 2500); }
+function matchBegin() { if (started) { const g = G(); if (g) g.paused = false; return; } const g = G(); if (!g) return; started = true; g.paused = false; if (MATCH.role === 'host') hostLoop(); updatePossessionHud(); banner('Match started — good luck!', 'ok', 2500); }
 function endMatchLocal(why) { banner(why, 'err', 8000); ov.classList.add('on'); S.screen = 'result'; S.result = { winner: 'tie', score: G() ? G().score : [0, 0], reason: 'abandoned', recorded: false }; render(); }
 function matchResult() { setTimeout(() => { ov.classList.add('on'); S.screen = 'result'; render(); }, 1800); }
 const ix = p => p ? p.team * 11 + p.idx : -1, r2 = x => Math.round(x * 100) / 100, byIx = i => i < 0 ? null : G().players[(i / 11) | 0][i % 11];
@@ -1074,6 +1094,7 @@ function hostLoop() {
   const iv = setInterval(() => {
     const g = G(); if (!g || S.result) return clearInterval(iv); if (!S.wsOK) return;
     const b = D().ball, P = g.players;
+    updatePossessionHud();
     tx({ t: 'rl', d: { k: 'snap', n: ++seq, ph: g.phase, q: g.qtr, cl: r2(g.clock), sc: g.score, po: g.poss, ut: g.userTeam, los: g.los, dn: g.down, tg: g.toGo, bt: g.ballTeam, fx: r2(g.fx), fz: r2(g.fz), ex: r2(g.exc), to: g.to, ch: g.chal, st: g.st, ct: ix(g.ctrl), ca: ix(g.carrier), cam: g.camMode,
       bl: [r2(b.x), r2(b.y), r2(b.z), r2(b.vx), r2(b.vy), r2(b.vz), b.state, ix(b.holder)],
       p: P.map(t => t.map(p => [r2(p.x), r2(p.z), r2(p.vx), r2(p.vz), r2(p.yaw), p.state, p.task || '', r2(p.jump || 0), p.carry ? 1 : 0, p.sub ? 1 : 0])) } });
@@ -1088,14 +1109,7 @@ function installGuest() {
     const g = G(), s = tgt; if (!g || !s || !started) return; const k = 1 - Math.exp(-dt * 18);
     g.phase = s.ph; g.qtr = s.q; g.clock = s.cl; g.score = s.sc.slice(); g.poss = s.po; g.userTeam = s.ut; g.los = s.los; g.down = s.dn; g.toGo = s.tg; g.ballTeam = s.bt; g.fx = s.fx; g.fz = s.fz; g.exc = s.ex; g.to = s.to; g.chal = s.ch; if (s.st) g.st = s.st;
     g.ctrl = byIx(s.ct); g.carrier = byIx(s.ca);
-    s.p.forEach((t, ti) => t.forEach((a, i) => {
-      const p = g.players[ti][i];
-      if (!p) return;
-      const far = Math.abs(p.x - a[0]) + Math.abs(p.z - a[1]) > 6;
-      p.x += (a[0] - p.x) * (far ? 1 : k); p.z += (a[1] - p.z) * (far ? 1 : k);
-      p.vx = a[2]; p.vz = a[3]; p.yaw = a[4];
-      p.state = a[5]; p.task = a[6]; p.jump = a[7]; p.carry = !!a[8];
-    }));
+    s.p.forEach((t, ti) => t.forEach((a, i) => { const p = g.players[ti][i]; if (!p) return; const far = Math.abs(p.x - a[0]) + Math.abs(p.z - a[1]) > 6; p.x += (a[0] - p.x) * (far ? 1 : k); p.z += (a[1] - p.z) * (far ? 1 : k); p.vx = a[2]; p.vz = a[3]; p.yaw = a[4]; p.state = a[5]; p.task = a[6]; p.jump = a[7]; p.carry = !!a[8]; }));
     const b = D().ball, a = s.bl; b.x += (a[0] - b.x) * k; b.y += (a[1] - b.y) * k; b.z += (a[2] - b.z) * k; b.vx = a[3]; b.vy = a[4]; b.vz = a[5]; b.state = a[6]; b.holder = byIx(a[7]);
     if (g.phase === 'final' && !finalSent) { finalSent = true; setTimeout(() => tx({ t: 'final', score: [g.score[0], g.score[1]] }), 1200); }
   };
@@ -1111,7 +1125,30 @@ function safeHTML(html) {                                      /* the host's bro
 }
 function matchRelay(d) {
   const g = G(); if (!g) return;
-  if (d.k === 'snap' && MATCH.role === 'guest') { if (lastSnap && d.n <= lastSnap) return; lastSnap = d.n; tgt = d; }
+  if (d.k === 'tossLock' && MATCH.role === 'guest') {
+    const toss = $('toss');
+    if (toss) {
+      const buttons = [...toss.querySelectorAll('#tbtn button')];
+      buttons.forEach(b => { b.disabled = true; b.style.opacity = '.45'; b.style.cursor = 'not-allowed'; });
+      const sub = toss.querySelector('#tsub');
+      if (sub) {
+        const chosen = d.choice === 'TAILS' ? 'TAILS' : 'HEADS';
+        const other = chosen === 'HEADS' ? 'TAILS' : 'HEADS';
+        sub.textContent = (d.role === 'guest' ? 'GUEST' : 'HOST') + ' called ' + chosen + ' — the other player is locked to ' + other + '. The coin is in the air...';
+      }
+    }
+    return;
+  }
+  /* The guest's coin-toss panel is mirrored HTML, so its original button handlers do not exist.
+     Route a guest's choice to the host simulation, which owns the real match state. */
+  if (d.k === 'toss' && MATCH.role === 'host' && started && g.phase === 'toss') {
+    const wanted = d.choice === 'TAILS' ? 'TAILS' : 'HEADS';
+    const toss = $('toss'), buttons = toss ? [...toss.querySelectorAll('#tbtn button')] : [];
+    const button = buttons.find(b => b.textContent.trim().toUpperCase() === wanted);
+    if (button) { window.__BL_TOSS_CALLER = 'guest'; button.click(); }
+    return;
+  }
+  if (d.k === 'snap' && MATCH.role === 'guest') { if (lastSnap && d.n <= lastSnap) return; lastSnap = d.n; tgt = d; updatePossessionHud(d); }
   else if (d.k === 'pnl' && MATCH.role === 'guest') {
     for (const id in d.m) { const e = $(id); if (e) { { const h = safeHTML(d.m[id][0]); if (e.innerHTML !== h) e.innerHTML = h; } e.classList.toggle('hide', !!d.m[id][1]); } }
     { let k = $('kgm'); if (!d.kgm) { if (k) k.remove(); } else { if (!k) { k = document.createElement('div'); k.id = 'kgm'; document.body.appendChild(k); k.onpointerdown = () => { if (G() && G().userTeam === 1) { tx({ t: 'rl', d: { k: 'inp', e: 'd', c: 'Space' } }); tx({ t: 'rl', d: { k: 'inp', e: 'u', c: 'Space' } }); } }; } k.style.cssText = d.kgm[0]; { const h = safeHTML(d.kgm[1]); if (k.innerHTML !== h) k.innerHTML = h; } } }
@@ -1121,7 +1158,24 @@ function matchRelay(d) {
   else if (d.k === 'inp' && MATCH.role === 'host' && g.userTeam === 1 && started) { const ks = D().keys; if (typeof d.c !== 'string' || !/^[A-Za-z0-9]{1,12}$/.test(d.c)) return; const ev = new KeyboardEvent(d.e === 'd' ? 'keydown' : 'keyup', { code: d.c, key: d.c, bubbles: true, cancelable: true }); ev.__bl = true; window.dispatchEvent(ev); }
   else if (d.k === 'ui' && MATCH.role === 'host' && started && PANELS.includes(d.id) && g.userTeam === 1) { const e = $(d.id); if (!e) return; if (d.i === -2) e.click(); else { const bs = e.querySelectorAll('button'); if (bs[d.i]) bs[d.i].click(); } }
 }
-if (MATCH) window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(1000); } catch (e) {} });
+if (MATCH) {
+  /* Both clients announce their toss choice to the server. The server accepts only
+     the first choice, locks the mirrored panel, and routes guest choices to the host's
+     authoritative game engine. Host clicks still run the original game handler. */
+  document.addEventListener('click', e => {
+    if (!started || !S.wsOK) return;
+    const button = e.target && e.target.closest ? e.target.closest('#toss #tbtn button') : null;
+    if (!button) return;
+    const choice = button.textContent.trim().toUpperCase();
+    if (choice !== 'HEADS' && choice !== 'TAILS') return;
+    tx({ t: 'rl', d: { k: 'toss', choice } });
+    if (MATCH.role === 'guest') {
+      e.preventDefault(); e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    }
+  }, true);
+  window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(1000); } catch (e) {} });
+}
 
 /* ---------- boot ---------- */
 GI.online = GI.online || false; window.BlitzOnline = { open: openOnline, state: S, safeHTML, diag: DIAG, retryDelay, MAX_ATTEMPTS };
@@ -4259,16 +4313,17 @@ const tint=(c,t,b)=>new T.Color(b).lerp(new T.Color(c),t).getStyle();
    RENDERER / SCENE
 ============================================================ */
 const canvas=$('c');
-const renderer=new T.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.75));
-renderer.shadowMap.enabled=true;
+const LOW_POWER = !!((navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) || (navigator.deviceMemory && navigator.deviceMemory <= 4));
+const renderer=new T.WebGLRenderer({canvas,antialias:!LOW_POWER,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,LOW_POWER?1:1.5));
+renderer.shadowMap.enabled=!LOW_POWER;
 renderer.shadowMap.type=T.PCFSoftShadowMap;
 const scene=new T.Scene();
 const camera=new T.PerspectiveCamera(30,1,0.5,1200);window.GI.eng={scene,T,camera,renderer};
 
 const hemi=new T.HemisphereLight(0xffffff,0x335533,1);scene.add(hemi);
 const sun=new T.DirectionalLight(0xffffff,1);
-sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
+sun.castShadow=!LOW_POWER;sun.shadow.mapSize.set(LOW_POWER?512:1024,LOW_POWER?512:1024);
 Object.assign(sun.shadow.camera,{left:-42,right:42,top:42,bottom:-42,near:1,far:240});
 sun.shadow.bias=-0.0004;
 scene.add(sun,sun.target);
@@ -6940,7 +6995,12 @@ function startToss(){
     startKickoff(rcv);
   };
   const call=(c)=>{
-    tb.innerHTML='';sub.textContent='The coin is in the air...';
+    /* The first valid click wins; immediately remove both choices to lock the call. */
+    if (!tb.querySelector('button')) return;
+    const caller = window.__BL_TOSS_CALLER === 'guest' ? 'GUEST' : 'HOST';
+    window.__BL_TOSS_CALLER = null;
+    const chosen = c === 'H' ? 'HEADS' : 'TAILS', opposite = c === 'H' ? 'TAILS' : 'HEADS';
+    tb.innerHTML='';sub.textContent=caller+' called '+chosen+' — the other player is locked to '+opposite+'. The coin is in the air...';
     const heads=Math.random()<0.5;
     coin.style.transform='rotateY(1800deg)';
     setTimeout(()=>{
@@ -7016,7 +7076,7 @@ G.defCall=DEFS[0];lineUp('under');updateMarkers();
 
 let last=performance.now(),tAcc=0,sbT=0;
 var shake=0;const WX={p:null,k:''};
-function updateWx(dt){const w=window.GI.wx||'';if(w!==WX.k){if(WX.p){scene.remove(WX.p);WX.p=null;}WX.k=w;if(w){const n=w==='rain'?3200:2200,g=new T.BufferGeometry(),a=new Float32Array(n*3);for(let i=0;i<n;i++){a[i*3]=rnd(-45,45);a[i*3+1]=rnd(0,40);a[i*3+2]=rnd(-45,45);}g.setAttribute('position',new T.BufferAttribute(a,3));WX.p=new T.Points(g,new T.PointsMaterial({color:w==='rain'?0xaac4ff:0xffffff,size:w==='rain'?0.13:0.26,transparent:true,opacity:0.85}));WX.p.frustumCulled=false;scene.add(WX.p);hemi.intensity*=0.82;}}
+function updateWx(dt){const w=window.GI.wx||'';if(w!==WX.k){if(WX.p){scene.remove(WX.p);WX.p=null;}WX.k=w;if(w){const n=LOW_POWER?(w==='rain'?900:650):(w==='rain'?2200:1500),g=new T.BufferGeometry(),a=new Float32Array(n*3);for(let i=0;i<n;i++){a[i*3]=rnd(-45,45);a[i*3+1]=rnd(0,40);a[i*3+2]=rnd(-45,45);}g.setAttribute('position',new T.BufferAttribute(a,3));WX.p=new T.Points(g,new T.PointsMaterial({color:w==='rain'?0xaac4ff:0xffffff,size:w==='rain'?0.13:0.26,transparent:true,opacity:0.85}));WX.p.frustumCulled=false;scene.add(WX.p);hemi.intensity*=0.82;}}
 if(!WX.p)return;const a=WX.p.geometry.attributes.position.array,v=w==='rain'?30:4,t=performance.now()/1000;WX.p.position.set(camera.position.x,0,camera.position.z);
 for(let i=0;i<a.length;i+=3){a[i+1]-=v*dt;if(w==='snow')a[i]+=Math.sin(t+i)*dt*0.8;if(a[i+1]<0)a[i+1]=40;}WX.p.geometry.attributes.position.needsUpdate=true;}
 const R={rec:[],on:false,i:0,prev:'',acc:0,d:1,sv:null,sc:0};
