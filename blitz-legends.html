@@ -561,12 +561,9 @@ const P=Array.from({length:220},()=>({x:Math.random()*c.width,y:-Math.random()*c
 })();
 </script>
 <script>/*BL-ONLINE*/
-/* ====== ONLINE SETTINGS: see SERVER_URL below and the README. No keys or secrets belong here. ====== */
+/* ====== ONLINE SETTINGS: set SERVER_URL to your game server's address (see README). No keys or secrets belong here. ====== */
 window.BLITZ_CONFIG = window.BLITZ_CONFIG || {
-  /* Address of the Blitz Legends game server, e.g. 'https://blitz-legends.example.org' (origin only: no path, no trailing slash).
-     RECOMMENDED: leave '' and let the game server host this page itself; the page then talks to the server it was loaded from.
-     Leave '' while developing too (a page opened from a file uses http://localhost:8787). No keys or secrets belong here. */
-  SERVER_URL: ''
+  SERVER_URL: 'https://blitz-legends.onrender.com'
 };
 /* Blitz Legends — online module (accounts via the game server; no third-party auth). Loaded by one <script> tag; everything is wrapped so a failure here cannot break single-player. */
 (function () {
@@ -579,7 +576,6 @@ const LS = { get: k => { try { return localStorage.getItem(k); } catch (e) { ret
 const SS = { get: k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} }, del: k => { try { sessionStorage.removeItem(k); } catch (e) {} } };
 const S = { screen: 'home', user: null, name: null, ws: null, wsOK: false, room: null, role: null, net: 'idle', msg: '', err: '', busy: false, count: 0, rtt: null, friends: [], outgoing: [], terms: null, termsErr: '', acc: false, saved: false, code: '', held: null, fstat: {}, reqs: [], blocks: [], stats: null, hist: [], list: [], invites: [], result: null, sync: { st: 'idle', t: 0, n: 0 }, match: J(SS.get('bl_match'), null), pick: { lg: GI.s.lg, i: GI.s.a || 0 }, auth: { tab: 'login' } };
 const MATCH = S.match;
-let countTimer = null;
 if (!MATCH && LS.get('bl_prev_gi3d') !== null) {          /* an earlier online match was abandoned: put the player's own team selection back */
   const p = LS.get('bl_prev_gi3d'); LS.del('bl_prev_gi3d'); if (p) LS.set('gi3d', p); else LS.del('gi3d'); (GI.reload ? GI.reload() : location.reload()); return;
 }
@@ -616,82 +612,29 @@ function banner(msg, kind, ms) { top.className = 'on'; top.innerHTML = `<div cla
 
 const css2 = document.createElement('style'); css2.textContent = `.bl-terms{max-height:38vh;overflow:auto;white-space:pre-wrap;background:#0d1830;border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:12px;margin:8px 0;font-size:14px}.bl-p label{display:block;margin:10px 0}.bl-p textarea{margin:6px 0}`; document.head.appendChild(css2);
 /* ---------- server API + session ---------- */
-const PLACEHOLDER = /YOUR-GAME-SERVER|\.example\.(com|org|net)(:|$)/i;
-function resolveServer() {
-  let u = String(CFG.SERVER_URL || '').trim().replace(/\/+$/, '');
-  if (!u) u = /^https?:$/.test(location.protocol) ? location.origin : (location.protocol === 'file:' ? 'http://localhost:8787' : '');   /* '' = the server that served this page */
-  return u;
-}
-const SERVER = resolveServer(), WS_URL = SERVER.replace(/^http/, 'ws') + '/ws';
-const urlProblem = !SERVER ? 'no_url' : !/^https?:\/\/[^\s/]+$/i.test(SERVER) ? 'bad_url' : (PLACEHOLDER.test(CFG.SERVER_URL || '') ? 'placeholder'
-  : (location.protocol === 'https:' && /^http:\/\//i.test(SERVER) && !/^http:\/\/(localhost|127\.0\.0\.1)(:|$)/i.test(SERVER)) ? 'mixed_content' : '');
-const configured = !urlProblem;
-const configMsg = () => ({ no_url: 'Online play is not set up: this page is not hosted by a game server and no SERVER_URL is configured.', placeholder: 'Online play is not configured yet: SERVER_URL is still the example placeholder. Set it to your real game server address (see the README).', bad_url: 'SERVER_URL must look like https://your-server.example.org (just the address, no path).', mixed_content: 'SERVER_URL uses http:// but this page uses https://, so the browser blocks it. Use an https:// server address.' }[urlProblem] || '');
+const SERVER = String(CFG.SERVER_URL || '').replace(/\/$/, ''), WS_URL = SERVER.replace(/^http/, 'ws') + '/ws', configured = /^https?:\/\//.test(SERVER);
 const getTok = () => LS.get('bl_tok') || SS.get('bl_tok');
 function setTok(t, rem) { LS.del('bl_tok'); SS.del('bl_tok'); if (t) (rem ? LS : SS).set('bl_tok', t); }
 const device = () => { let d = LS.get('bl_device'); if (!d) { d = Math.random().toString(36).slice(2, 10); LS.set('bl_device', d); } return d; };
-/* ---------- connection diagnostics: stage + path + status only. Tokens, passwords and save data are never logged. ---------- */
-const DIAG = [];
-function dlog(stage, detail) { DIAG.push({ t: new Date().toISOString().slice(11, 19), stage, detail: String(detail == null ? '' : detail).slice(0, 160) }); if (DIAG.length > 40) DIAG.shift(); }
-const MAX_ATTEMPTS = 12; let attempts = 0, connecting = false;
-const RETRY = Object.assign({ base: 1000, cap: 30000, min: 400 }, CFG.RETRY || {});                               /* ms; override in BLITZ_CONFIG.RETRY for testing */
-const retryDelay = n => Math.max(RETRY.min, Math.floor(Math.random() * Math.min(RETRY.cap, RETRY.base * Math.pow(2, n))));      /* exponential backoff with full jitter */
-function netFail(state, msg) { S.net = state; S.netMsg = msg; dlog('state', state); return { ok: false, state, message: msg }; }
-/* Test the ACTUAL configured server (not just navigator.onLine) and say WHY it is not usable. */
-async function probe() {
-  if (!configured) return netFail('unconfigured', configMsg());
-  const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 6000); let r;
-  try { r = await fetch(SERVER + '/api/health', { cache: 'no-store', signal: ctl.signal }); }
-  catch (e) {
-    clearTimeout(to); const timeout = e && e.name === 'AbortError'; dlog('health', timeout ? 'timeout' : 'network error');
-    if (navigator.onLine === false) return netFail('device_offline', 'This device appears to be offline. Check Wi-Fi or mobile data. Single-player still works.');
-    return netFail('server_unavailable', timeout ? 'The game server did not answer in time. It may be busy or starting up.' : 'The game server can’t be reached. It may be offline, the server address may be wrong, or this website may not be allowed to use it.');
-  }
-  clearTimeout(to); let j = null; try { j = await r.json(); } catch (e) {} dlog('health', 'HTTP ' + r.status);
-  if (!j || j.service !== 'blitz-legends') return netFail('bad_url', 'That address answered, but it is not a Blitz Legends game server. Check SERVER_URL.');
-  if (j.protocol !== 1) return netFail('bad_url', 'This game version is not compatible with that server (protocol ' + j.protocol + ').');
-  if (!r.ok || j.status !== 'ok') return netFail('server_unavailable', 'The game server is running but having trouble' + (j.db === 'down' ? ' (its database is down)' : '') + '. Try again shortly.');
-  return { ok: true, health: j };
-}
 async function api(method, path, body) {
-  const tok = getTok(); let r, j; const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 25000);
-  try { r = await fetch(SERVER + path, { method, signal: ctl.signal, headers: { 'Content-Type': 'application/json', ...(tok ? { Authorization: 'Bearer ' + tok } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); j = await r.json().catch(() => ({})); clearTimeout(to); }
-  catch (e) {
-    clearTimeout(to); const timeout = e && e.name === 'AbortError', off = navigator.onLine === false;
-    dlog('http', method + ' ' + path.replace(/\/gi3d\w*/, '/<slot>') + ' failed: ' + (timeout ? 'timeout' : 'network error'));
-    const n = new Error(off ? 'This device appears to be offline. Check Wi-Fi or mobile data. Single-player still works.' : timeout ? 'The game server did not answer in time. It may be busy or starting up.' : 'The game server can’t be reached. It may be offline, the server address may be wrong, or this website may not be allowed to use it.');
-    n.code = 'network'; n.reason = off ? 'device_offline' : timeout ? 'timeout' : 'unreachable'; throw n;
-  }
-  if (!/json/i.test(r.headers.get('content-type') || '') && ![502, 503, 504].includes(r.status)) {
-    dlog('http', method + ' ' + path.replace(/\/gi3d\w*/, '/<slot>') + ' -> ' + r.status + ' (not JSON: not a Blitz server?)');
-    const n = new Error('That address answered, but it is not a Blitz Legends game server. Check SERVER_URL.'); n.code = 'network'; n.reason = 'bad_url'; throw n;
-  }
-  if (!r.ok) {
-    dlog('http', method + ' ' + path.replace(/\/gi3d\w*/, '/<slot>') + ' -> ' + r.status + ' ' + (j.error || ''));
-    const e = new Error(j.message || 'The server returned an error (' + r.status + ').'); e.code = j.error || 'http_' + r.status; e.status = r.status; e.data = j;
-    if (r.status === 502 || r.status === 503 || r.status === 504) { e.code = 'network'; e.reason = 'server_unavailable'; }      /* temporary server trouble: treated like "offline, retry later" */
-    else if (r.status === 401 && tok && path !== '/api/login' && path !== '/api/recover') sessionLost(e.code);
-    throw e;
-  }
+  const tok = getTok(); let r, j;
+  try { r = await fetch(SERVER + path, { method, headers: { 'Content-Type': 'application/json', ...(tok ? { Authorization: 'Bearer ' + tok } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); j = await r.json().catch(() => ({})); }
+  catch (e) { const n = new Error('Cannot reach the game server. Check your internet connection and try again.'); n.code = 'network'; throw n; }
+  if (!r.ok) { const e = new Error(j.message || 'The server returned an error (' + r.status + ').'); e.code = j.error || 'http_' + r.status; e.status = r.status; e.data = j; if (r.status === 401 && tok && path !== '/api/login' && path !== '/api/recover') sessionLost(e.code); throw e; }
   return j;
 }
 const friendly = e => !e ? '' : (e.message || 'Something went wrong.');
-function sessionLost(code) { if (!S.user) return; S.noRetry = true; try { S.ws && S.ws.close(1000); } catch (e) {} setTok(null); S.user = null; S.name = null; S.room = null; S.wsOK = false; S.net = 'auth_required'; S.netMsg = ''; S.err = code === 'suspended' ? '' : 'Your session expired. Please sign in again.'; S.screen = 'auth'; S.auth.tab = 'login'; ov.classList.add('on'); render(); }
+function sessionLost(code) { if (!S.user) return; S.noRetry = true; try { S.ws && S.ws.close(1000); } catch (e) {} setTok(null); S.user = null; S.name = null; S.room = null; S.wsOK = false; S.net = 'idle'; S.err = code === 'suspended' ? '' : 'Your session expired. Please sign in again.'; S.screen = 'auth'; S.auth.tab = 'login'; ov.classList.add('on'); render(); }
 async function initAuth() {
-  if (!configured) { S.net = 'unconfigured'; S.netMsg = configMsg(); dlog('config', urlProblem); render(); return; }
+  if (!configured) { S.net = 'unconfigured'; render(); return; }
   if (!getTok()) { restoreCode(); render(); return; }
-  try { const me = await api('GET', '/api/me'); initAuth.tries = 0; await signedIn(me.user, !!SS.get('bl_code')); }
-  catch (e) {
-    if (e.code === 'network') {
-      S.net = e.reason === 'device_offline' ? 'device_offline' : e.reason === 'bad_url' ? 'bad_url' : 'server_unavailable'; S.netMsg = e.message; clearTimeout(initAuth.t); initAuth.tries = (initAuth.tries || 0) + 1;
-      if (initAuth.tries < MAX_ATTEMPTS) initAuth.t = setTimeout(initAuth, retryDelay(initAuth.tries)); else { S.gaveUp = true; S.netMsg += ' Automatic retries stopped. Press Retry.'; }
-    } else { setTok(null); if (e.code === 'suspended') S.err = e.message; }
-  }
+  try { const me = await api('GET', '/api/me'); await signedIn(me.user, !!SS.get('bl_code')); }
+  catch (e) { if (e.code === 'network') { S.net = 'offline'; clearTimeout(initAuth.t); initAuth.t = setTimeout(initAuth, 5000); } else { setTok(null); if (e.code === 'suspended') S.err = e.message; } }
   restoreCode(); render();
 }
 function restoreCode() { const pc = J(SS.get('bl_code'), null); if (pc && !MATCH) { S.code = pc.code; S.codeNext = pc.next; S.saved = false; S.screen = 'recovery'; ov.classList.add('on'); } }
 async function signedIn(user, hold) {
-  S.user = user; S.name = user.username; S.noRetry = false; attempts = 0; S.gaveUp = false;
+  S.user = user; S.name = user.username; S.noRetry = false; backoff = 500;
   const changed = MATCH ? false : prepareLocal();
   if (!user.terms_ok) { S.screen = 'terms_accept'; ov.classList.add('on'); await loadTerms(); }
   else if (!MATCH) { if (hold) S.held = { changed }; else syncAll(true, changed); }
@@ -752,9 +695,7 @@ setInterval(async () => {                                                      /
     else if (S.sync.st === 'offline' || S.sync.st === 'error') syncAll(); } catch (e) { S.sync.st = e.code === 'network' ? 'offline' : 'error'; if (ov.classList.contains('on')) render(); }
 }, 20000);
 window.addEventListener('visibilitychange', () => { if (document.hidden) syncAll(); });
-window.addEventListener('online', () => { dlog('net', 'browser reports online'); resetRetry(); if (S.user) syncAll(); });
-window.addEventListener('offline', () => { dlog('net', 'browser reports offline'); if (S.user || getTok()) { S.net = 'device_offline'; S.netMsg = 'This device appears to be offline. Check Wi-Fi or mobile data. Single-player still works.'; render(); } });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && (S.user || getTok()) && !S.wsOK && S.gaveUp) resetRetry(); });
+window.addEventListener('online', () => { if (S.user) { syncAll(); connect(); } else if (getTok()) initAuth(); });
 async function doLogout() {
   S.busy = true; render(); await syncAll(); const uid = String(S.user.uid);
   if (S.sync.st !== 'ok' && unsynced(uid) && !confirm('Your latest progress could not be uploaded (' + (S.sync.msg || 'connection problem') + ').\n\nSign out anyway? A private copy stays on this device and uploads the next time you sign in.')) { S.busy = false; render(); return; }
@@ -766,54 +707,28 @@ async function doLogout() {
 }
 
 /* ---------- networking ---------- */
-let wsTimer = null, pingT = null, gen = 0;
-/* States: CONNECTING -> ONLINE ('ok') -> RECONNECTING -> ONLINE, plus device_offline (OFFLINE), server_unavailable, auth_required, bad_url, unconfigured. */
-function resetRetry(manual) {
-  S.noRetry = false; attempts = 0; S.gaveUp = false; initAuth.tries = 0; clearTimeout(wsTimer); clearTimeout(initAuth.t);
-  if (manual) dlog('retry', 'manual');
-  if (S.user) { if (!S.ws || S.ws.readyState > 1) connect(); } else if (getTok()) initAuth();
-  render();
-}
+let backoff = 500, wsTimer = null, pingT = null, handlers = [];
 function connect() {
-  if (!configured || !S.user || connecting || (S.ws && S.ws.readyState <= 1)) return;          /* never two sockets at once */
-  clearTimeout(wsTimer); connecting = true; S.net = (attempts > 0 || S.everOnline) ? 'reconnecting' : 'connecting'; render();
-  let ws; try { ws = new WebSocket(WS_URL); } catch (e) { dlog('ws', 'constructor failed: ' + (e && e.name)); connecting = false; return failed('handshake'); }
-  S.ws = ws; let opened = false, authed = false; const to = setTimeout(() => { if (!authed) { dlog('ws', 'handshake/auth timeout'); try { ws.close(); } catch (e) {} } }, 9000);
-  ws.onopen = () => { if (S.ws !== ws) return; opened = true; dlog('ws', 'socket open, authenticating'); const t = getTok(); if (!t) return ws.close(); ws.send(JSON.stringify({ t: 'auth', token: t })); };
-  ws.onmessage = e => { if (S.ws !== ws) return; S.lastRx = Date.now(); const m = J(e.data); if (m) { if (m.t === 'auth' && m.ok) authed = true; onMsg(m); } };
-  ws.onclose = ev => {
-    clearTimeout(to); if (S.ws !== ws) return; connecting = false; clearInterval(pingT); const was = S.wsOK; S.wsOK = false;
-    dlog('ws', 'closed code=' + (ev && ev.code) + ' opened=' + opened + ' authed=' + authed); if (was && MATCH) matchNet(false);
-    if (!S.user) { S.net = 'idle'; render(); return; } if (S.noRetry) { render(); return; }
-    failed(!opened ? 'handshake' : authed ? 'dropped' : 'auth');
-  };
-  ws.onerror = () => { dlog('ws', 'error event'); };
+  if (!configured || !S.user || (S.ws && S.ws.readyState <= 1)) return; clearTimeout(wsTimer); S.net = 'connecting'; render();
+  let ws; try { ws = new WebSocket(WS_URL); } catch (e) { return retry(); } S.ws = ws; const to = setTimeout(() => { if (!S.wsOK) try { ws.close(); } catch (e) {} }, 9000);
+  ws.onopen = () => { const t = getTok(); if (!t) return ws.close(); ws.send(JSON.stringify({ t: 'auth', token: t })); };
+  ws.onmessage = e => { const m = J(e.data); if (m) onMsg(m); };
+  ws.onclose = () => { clearTimeout(to); clearInterval(pingT); const was = S.wsOK; S.wsOK = false; if (S.ws === ws) { S.net = S.user ? 'offline' : 'idle'; if (was && MATCH) matchNet(false); render(); if (S.user && !S.noRetry) retry(); } };
+  ws.onerror = () => {};
 }
-async function failed(stage) {                                /* decide WHY we are not connected, then back off (with jitter) and retry a bounded number of times */
-  attempts++; S.wsOK = false; const p = await probe();
-  if (S.noRetry || !S.user || (S.ws && S.ws.readyState <= 1)) return;
-  if (p.ok) { S.net = 'reconnecting'; S.netMsg = stage === 'handshake' ? 'The game server is reachable, but the live connection (WebSocket) could not be opened. A firewall, proxy or VPN may be blocking it.' : 'Connection interrupted. Reconnecting…'; }
-  if (attempts >= MAX_ATTEMPTS) { S.gaveUp = true; S.netMsg += ' Automatic retries stopped. Press Retry.'; dlog('retry', 'gave up after ' + attempts + ' attempts'); render(); return; }
-  const d = retryDelay(attempts); dlog('retry', 'attempt ' + attempts + ' in ' + Math.round(d / 100) / 10 + ' s'); render(); clearTimeout(wsTimer); wsTimer = setTimeout(connect, d);
-}
-function dropStale(ws) {                                       /* a half-open socket never fires onclose quickly: abandon it ourselves */
-  dlog('heartbeat', 'no data for 15 s, dropping stale connection'); const was = S.wsOK; clearInterval(pingT); S.wsOK = false; S.ws = null; connecting = false;
-  try { ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); } catch (e) {} if (was && MATCH) matchNet(false); failed('dropped');
-}
+function retry() { S.net = 'offline'; render(); clearTimeout(wsTimer); wsTimer = setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 15000); }
 const tx = o => { if (S.ws && S.ws.readyState === 1) { S.ws.send(JSON.stringify(o)); return true; } return false; };
 function onMsg(m) {
   switch (m.t) {
-    case 'auth': if (!m.ok) { if (m.err === 'rate_limited') { S.netMsg = 'Too many connection attempts. Waiting a moment…'; render(); return; } S.noRetry = true; S.net = 'denied'; S.netMsg = ''; if (m.err === 'bad_token' || m.err === 'session_expired') { sessionLost(m.err); return; } S.err = { suspended: 'This account is suspended.', terms_required: 'Please accept the updated Terms of Use first.' }[m.err] || ('Could not sign in to the game server (' + m.err + ').'); render(); return; }
-      S.noRetry = false; S.wsOK = true; S.net = 'ok'; S.netMsg = ''; S.everOnline = true; connecting = false; attempts = 0; S.gaveUp = false; S.lastRx = Date.now(); dlog('ws', 'online'); S.name = m.name; if (m.role) S.role = m.role; clearInterval(pingT);
-      const me = S.ws; pingT = setInterval(() => { if (!me || me.readyState !== 1) return; if (Date.now() - S.lastRx > 15000) return dropStale(me); S._p = Date.now(); tx({ t: 'ping', ts: S._p }); }, 5000);   /* heartbeat + stale-connection detection */ if (MATCH) matchNet(true); render(); return;
+    case 'auth': if (!m.ok) { S.noRetry = true; S.net = 'denied'; if (m.err === 'bad_token' || m.err === 'session_expired') { sessionLost(m.err); return; } S.err = { suspended: 'This account is suspended.', terms_required: 'Please accept the updated Terms of Use first.' }[m.err] || ('Could not sign in to the game server (' + m.err + ').'); render(); return; }
+      S.noRetry = false; S.wsOK = true; S.net = 'ok'; backoff = 500; S.name = m.name; if (m.role) S.role = m.role; clearInterval(pingT); pingT = setInterval(() => { S._p = Date.now(); tx({ t: 'ping', ts: S._p }); }, 5000); if (MATCH) matchNet(true); render(); return;
     case 'pong': S.rtt = Date.now() - m.ts; if (ov.classList.contains('on') && S.screen === 'settings') render(); return;
-    case 'room': S.room = m.room; if (m.room?.st === 'lobby') { if (countTimer) clearInterval(countTimer); countTimer = null; S.count = 0; } if (m.role) S.role = m.role; if (S.screen !== 'lobby' && !MATCH) go('lobby'); else render(); autoLeague(); return;
+    case 'room': S.room = m.room; if (m.role) S.role = m.role; if (S.screen !== 'lobby' && !MATCH) go('lobby'); else render(); autoLeague(); return;
     case 'matched': S.room = m.room; S.role = m.role; go('lobby'); return;
     case 'queued': S.net = 'ok'; go('quick'); return; case 'qtimeout': S.err = 'No opponent found yet. Try again or create a private game.'; go('home'); return; case 'qcancelled': return;
-    case 'count': if (countTimer) clearInterval(countTimer); S.count = Math.ceil(m.ms / 1000); render(); countTimer = setInterval(() => { S.count--; if (S.count <= 0) { clearInterval(countTimer); countTimer = null; S.count = 0; } render(); }, 1000); return;
+    case 'count': S.count = Math.ceil(m.ms / 1000); render(); const iv = setInterval(() => { S.count--; if (S.count <= 0) clearInterval(iv); render(); }, 1000); return;
     case 'go': if (MATCH) { if (m.live && !started) { if (MATCH.role === 'host') { tx({ t: 'leave' }); endMatchLocal('The match was lost when the page reloaded.'); } else { const w = setInterval(() => { if (G()) { clearInterval(w); matchBegin(); } }, 100); } } return; } startMatch(m); return; case 'start': if (MATCH) matchBegin(); return;
-    case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', inactive_timeout: 'The match ended because a player was inactive for 5 minutes.', load_timeout: 'The match failed to load in time.', match_finished: 'The match has ended.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.', server_restart: 'The game server is restarting. Reconnecting…' }[m.why] || 'The game was closed.'; S.room = null; S.err = w;
-      if (m.why === 'signed_in_elsewhere') { S.noRetry = true; S.net = 'denied'; S.netMsg = 'You signed in on another device. Press Retry to use this one instead.'; }   /* without this, two devices kick each other off forever */ if (MATCH) endMatchLocal(w); else go('home'); return; }
+    case 'closed': { const w = { host_left: 'The host left the game.', opponent_left: 'Your opponent left the match.', load_timeout: 'The match failed to load in time.', signed_in_elsewhere: 'You signed in on another device.', timeout: 'The lobby timed out.' }[m.why] || 'The game was closed.'; S.room = null; S.err = w; if (MATCH) endMatchLocal(w); else go('home'); return; }
     case 'peer': matchPeer(m.on); S.msg = m.on ? '' : 'Opponent disconnected — waiting up to 30 s for them to return…'; if (S.room) render(); return;
     case 'err': S.err = m.msg || ('Error: ' + m.code); render(); return;
     case 'list': S.list = m.rooms; render(); return; case 'friends_status': S.fstat = {}; m.list.forEach(f => S.fstat[f.name] = f.st); render(); return;
@@ -836,11 +751,10 @@ const go = (s) => { S.screen = s; if (s !== 'home') S.msg = S.msg; render(); };
 function openOnline(scr) { if (scr) S.screen = scr; ov.classList.add('on'); if (!S.user) S.screen = (S.screen === 'terms' || S.screen === 'recovery') ? S.screen : 'auth'; else if (!S.user.terms_ok) S.screen = 'terms_accept'; else if (S.screen === 'auth') S.screen = 'home'; render(); if (S.user && S.screen === 'friends') loadSocial(); else if (S.user && S.screen === 'profile') loadSocial().then(loadProfile); else if (S.user && S.wsOK) tx({ t: 'friends_status' }); }
 function closeOnline() { ov.classList.remove('on'); }
 const btn = (label, act, cls, sub) => `<button class="bl-b ${cls || ''}" data-a="${act}">${label}${sub ? `<small>${sub}</small>` : ''}</button>`;
-const SPIN = '<span class="bl-spin" style="width:12px;height:12px;border-width:2px;display:inline-block;margin:0 6px 0 0;vertical-align:middle"></span>', DOT = '<span class="bl-dot"></span>';
-const netBadge0 = () => ({ ok: `<span class="bl-dot on"></span>Online${S.rtt != null ? ' · ' + S.rtt + ' ms' : ''}`, connecting: SPIN + 'Connecting…', reconnecting: SPIN + 'Reconnecting…', device_offline: DOT + 'No network on this device', server_unavailable: DOT + (S.gaveUp ? 'Server unavailable' : 'Server unavailable — retrying'), auth_required: DOT + 'Sign-in required', bad_url: DOT + 'Wrong server address', offline: DOT + 'Offline — retrying', denied: DOT + 'Disconnected', idle: DOT + 'Signed out', unconfigured: DOT + 'Not configured' }[S.net] || '');
+const netBadge0 = () => ({ ok: `<span class="bl-dot on"></span>Connected${S.rtt != null ? ' · ' + S.rtt + ' ms' : ''}`, connecting: '<span class="bl-spin" style="width:12px;height:12px;border-width:2px;display:inline-block;margin:0 6px 0 0;vertical-align:middle"></span>Connecting…', offline: '<span class="bl-dot"></span>Offline — retrying', denied: '<span class="bl-dot"></span>Not allowed', idle: '<span class="bl-dot"></span>Signed out', unconfigured: '<span class="bl-dot"></span>Not configured' }[S.net] || '');
 const netBadge = () => netBadge0() + (S.user && !MATCH ? ' · ☁ ' + ({ idle: 'not synced yet', syncing: 'saving…', ok: 'saved online', offline: 'offline — will sync', error: 'save problem', conflict: 'needs attention' }[S.sync.st] || '') : '');
 const alerts = () => (S.err ? `<div class="bl-err">${esc(S.err)} ${btn('Dismiss', 'clr', 'dim')}</div>` : '') + (S.msg ? `<div class="bl-ok">${esc(S.msg)}</div>` : '');
-const needNet = () => S.wsOK ? '' : `<div class="bl-err">${esc(S.netMsg || 'Online features are unavailable while disconnected.')} ${(S.net === 'connecting' || S.net === 'reconnecting' || (S.net === 'server_unavailable' && !S.gaveUp)) ? 'Reconnecting automatically…' : ''} ${btn('Retry now', 'retry', 'dim')}<small>You can still play single-player, Franchise and Road to Glory offline.</small></div>`;
+const needNet = () => S.wsOK ? '' : `<div class="bl-err">Online features are unavailable while disconnected. ${S.net === 'offline' || S.net === 'connecting' ? 'Reconnecting automatically…' : ''} ${btn('Retry now', 'retry', 'dim')}<small>You can still play single-player, Franchise and Road to Glory offline.</small></div>`;
 const head = (title, back) => `<div class="bl-row" style="justify-content:space-between"><h2>${title}</h2><div style="flex:0">${back === false ? '' : btn('← Back', back || 'home', 'dim')}</div></div><small class="bl-dim">${netBadge()}${S.name ? ' · ' + esc(S.name) : ''}</small>${alerts()}`;
 const screens = {
   home: () => `<h2>BLITZ LEGENDS ONLINE</h2><small>${netBadge()}${S.name ? ' · signed in as <b>' + esc(S.name) + '</b>' : ''}</small>${alerts()}${needNet()}
@@ -882,10 +796,10 @@ const screens = {
     ${y.st === 'conflict' ? `<p>Which version should we keep? The other one is backed up automatically.</p>${btn('Keep CLOUD saves', 'keepcloud', 'go')}${btn('Keep THIS DEVICE saves', 'keeplocal')}` : ''}
     ${btn('Sync now', 'sync', '', 'Franchise, Road to Glory, customization and career data each sync separately')}<label><input type="checkbox" id="blauto" style="width:auto" ${LS.get('bl_autosave') !== '0' ? 'checked' : ''}> Automatic cloud saving</label>
     ${btn('Sign out', 'logout', 'dim')}`; },
-  settings: () => `${head('ONLINE SETTINGS')}<h3>Connection</h3><div class="bl-seat">${netBadge()}<br><small>Server: ${esc(SERVER || 'not set')}</small>${S.netMsg ? '<br><small>' + esc(S.netMsg) + '</small>' : ''}</div>${btn('Reconnect', 'retry')}<h3>Connection log</h3><div class="bl-terms" style="max-height:24vh;font-size:12px">${DIAG.length ? DIAG.map(d => esc(d.t + '  ' + d.stage + ': ' + d.detail)).join('\n') : 'Nothing yet.'}</div>${btn('Copy connection log', 'copydiag', 'dim')}
+  settings: () => `${head('ONLINE SETTINGS')}<h3>Connection</h3><div class="bl-seat">${netBadge()}<br><small>Server: ${esc(SERVER || 'not set')}</small></div>${btn('Reconnect', 'retry')}
     <h3>Preferences</h3><label><input type="checkbox" id="blrem" style="width:auto" ${remember() ? 'checked' : ''}> Remember me on this device</label><br><label><input type="checkbox" id="blauto2" style="width:auto" ${LS.get('bl_autosave') !== '0' ? 'checked' : ''}> Automatic cloud saving</label>`,
   result: () => { const r = S.result || {}; return `<h2>${r.reason === 'abandoned' ? 'MATCH ENDED' : r.winner === 'you' ? 'YOU WIN!' : r.winner === 'opp' ? 'DEFEAT' : 'TIE GAME'}</h2><div class="bl-code" style="letter-spacing:.1em">${(r.score || [0, 0]).join(' – ')}</div>
-    <div class="${r.recorded ? 'bl-ok' : 'bl-err'}">${r.recorded ? (r.reason === 'forfeit' ? 'Your opponent left. The win was added to your online record.' : r.verified === false ? 'Added to your online record. The server could not fully cross-check this score.' : 'Result verified and added to your online record.') : r.reason === 'disputed' ? 'The two game clients disagreed on the score, so this match was NOT recorded.' : r.reason === 'too_short' ? 'Match ended too early to count.' : 'This result was not recorded.'}</div>${btn('Back to menu', 'endmatch', 'go')}`; }
+    <div class="${r.recorded ? 'bl-ok' : 'bl-err'}">${r.recorded ? 'Result verified and added to your online record.' : r.reason === 'disputed' ? 'The two game clients disagreed on the score, so this match was NOT recorded.' : r.reason === 'too_short' ? 'Match ended too early to count.' : 'This result was not recorded.'}</div>${btn('Back to menu', 'endmatch', 'go')}`; }
 };
 const checked = f => f ? 'checked' : '';
 const field = (id, ph, type, extra) => `<input id="${id}" type="${type || 'text'}" placeholder="${esc(ph)}" ${extra || ''}>`;
@@ -893,8 +807,8 @@ const termsBox = () => S.terms ? `<div class="bl-terms" tabindex="0">${esc(S.ter
 const accept = (act, label) => `<label><input id="blacc" type="checkbox" style="width:auto" ${checked(S.acc)}> I have read and accept the Terms of Use and Community Rules</label><button class="bl-b go" id="blaccbtn" data-a="${act}" ${(!S.acc || S.busy || !S.terms) ? 'disabled' : ''}>${S.busy ? 'Please wait…' : label}</button>`;
 const REASONS = [['harassment', 'Bullying or harassment'], ['threats', 'Threats'], ['hate', 'Hate speech'], ['cheating', 'Cheating or exploiting'], ['impersonation', 'Pretending to be someone else / staff'], ['inappropriate_name', 'Inappropriate username'], ['scam', 'Scam or account stealing'], ['personal_info', 'Asking for private information'], ['other', 'Something else']];
 Object.assign(screens, {
-  auth: () => { const t = S.auth.tab, offline = getTok() && !S.user && ['device_offline', 'server_unavailable', 'reconnecting', 'connecting', 'bad_url'].includes(S.net); return `<h2>${{ login: 'SIGN IN', register: 'CREATE ACCOUNT', recover: 'RECOVER ACCOUNT' }[t]}</h2>${alerts()}
-    ${offline ? '<div class="bl-err">' + esc(S.netMsg || 'Can’t reach the game server right now.') + ' You’ll be signed in automatically when it’s back. Single-player works offline. ' + btn('Retry now', 'retry', 'dim') + '</div>' : ''}${!configured ? '<div class="bl-err">' + esc(configMsg()) + '</div>' : ''}
+  auth: () => { const t = S.auth.tab, offline = getTok() && !S.user && S.net === 'offline'; return `<h2>${{ login: 'SIGN IN', register: 'CREATE ACCOUNT', recover: 'RECOVER ACCOUNT' }[t]}</h2>${alerts()}
+    ${offline ? '<div class="bl-err">Can’t reach the game server right now. You’ll be signed in automatically when it’s back. Single-player works offline.</div>' : ''}${!configured ? '<div class="bl-err">Online play is not configured yet: set SERVER_URL in the ONLINE SETTINGS block of this file.</div>' : ''}
     ${t === 'recover' ? '<small>Enter your username, the recovery code you saved when you created the account, and a new password.</small>' : `<div class="bl-tabs">${btn('Sign in', 'tab:login', t === 'login' ? 'go' : '')}${btn('Register', 'tab:register', t === 'register' ? 'go' : '')}</div>`}
     <form id="blf" data-f="${t}" autocomplete="on" novalidate>
     ${field('bl-un', t === 'register' ? 'Username (3–16: letters, numbers, _)' : 'Username', 'text', 'maxlength="16" autocomplete="username" autocapitalize="off" spellcheck="false"')}
@@ -932,7 +846,7 @@ Object.assign(screens, {
   profile: () => { const s = S.stats || {}, g = s.games || 0; return `${head('ONLINE PROFILE')}<div class="bl-seat"><b style="font-size:22px">${esc(S.name || '—')}</b><br><small>Favorite team: ${esc(S.fav ? teamName(S.fav) : 'not set yet')}</small></div>
     <div class="bl-row" style="text-align:center"><div class="bl-seat"><b>${s.wins || 0}-${s.losses || 0}${s.ties ? '-' + s.ties : ''}</b><br><small>Record</small></div><div class="bl-seat"><b>${g ? Math.round(100 * (s.wins || 0) / g) : 0}%</b><br><small>Win %</small></div><div class="bl-seat"><b>${s.pf || 0}/${s.pa || 0}</b><br><small>Points for/against</small></div></div>
     <h3>Favorite team</h3>${teamPicker('f')}${btn('Save favorite team', 'savefav')}<h3>Recent matches</h3>${S.hist.length ? S.hist.map(h => `<div class="bl-seat"><b>${h.won === 1 ? 'WIN' : h.won === 0 ? 'LOSS' : 'TIE'}</b> ${h.me}–${h.opp} <small>vs ${esc(h.opp_name)}${h.reason === 'forfeit' ? ' · forfeit' : ''}${h.verified ? '' : ' · unverified'} · ${new Date(h.at).toLocaleDateString()}</small></div>`).join('') : '<small>No online matches yet.</small>'}`; },
-  settings: () => `${head('ONLINE SETTINGS')}<h3>Connection</h3><div class="bl-seat">${netBadge()}<br><small>Server: ${esc(SERVER || 'not set')}</small>${S.netMsg ? '<br><small>' + esc(S.netMsg) + '</small>' : ''}</div>${btn('Reconnect', 'retry')}<h3>Connection log</h3><div class="bl-terms" style="max-height:24vh;font-size:12px">${DIAG.length ? DIAG.map(d => esc(d.t + '  ' + d.stage + ': ' + d.detail)).join('\n') : 'Nothing yet.'}</div>${btn('Copy connection log', 'copydiag', 'dim')}
+  settings: () => `${head('ONLINE SETTINGS')}<h3>Connection</h3><div class="bl-seat">${netBadge()}<br><small>Server: ${esc(SERVER || 'not set')}</small></div>${btn('Reconnect', 'retry')}
     <h3>Preferences</h3><label><input type="checkbox" id="blauto2" style="width:auto" ${LS.get('bl_autosave') !== '0' ? 'checked' : ''}> Automatic cloud saving</label>
     <h3>Safety</h3>${btn('Rules &amp; Terms', 'terms_view')}${btn('Blocked players &amp; reports', 'friends')}`
 });
@@ -994,7 +908,7 @@ async function act(a, el) {
   try {
     switch (k) {
       case 'close': return closeOnline(); case 'clr': S.err = ''; return render(); case 'home': S.queued = false; return go('home');
-      case 'tab': S.auth.tab = arg; S.screen = 'auth'; return render(); case 'retry': resetRetry(true); return; case 'copydiag': try { await navigator.clipboard.writeText(DIAG.map(d => d.t + '  ' + d.stage + ': ' + d.detail).join('\n')); banner('Connection log copied', 'ok', 1500); } catch (e) {} return; case 'loadterms': return loadTerms();
+      case 'tab': S.auth.tab = arg; S.screen = 'auth'; return render(); case 'retry': S.noRetry = false; backoff = 500; connect(); return; case 'loadterms': return loadTerms();
       case 'quick': case 'create': case 'join': case 'profile': case 'account': case 'settings': case 'friends': case 'chpw': case 'regen': case 'danger': case 'terms_view':
         go(k); if (k === 'friends') loadSocial(); if (k === 'profile') { loadSocial().then(loadProfile); } if (k === 'join') tx({ t: 'list' }); if (k === 'account') syncAll(); if (k === 'terms_view' && !S.terms) loadTerms(); return;
       case 'regdone': {
@@ -1002,7 +916,7 @@ async function act(a, el) {
         try { const r = await api('POST', '/api/register', { username: S.reg.username, password: S.reg.password, terms_version: S.terms.version, remember: S.reg.remember, device: device() });
           setTok(r.token, S.reg.remember); S.rem = S.reg.remember; S.reg = null; showCode(r.recovery_code, 'home'); S.busy = false; await signedIn(r.user, true); S.screen = 'recovery'; return render(); }
         catch (e) { S.busy = false; S.err = friendly(e); if (ACCT_FIELD_ERR.includes(e.code)) { S.auth.tab = 'register'; S.screen = 'auth'; } render(); } return; }
-      case 'termsok': { if (!S.acc || !S.terms) return; await api('POST', '/api/terms/accept', { version: S.terms.version }); S.user.terms_ok = true; S.screen = 'home'; S.err = ''; resetRetry(); syncAll(true); return render(); }
+      case 'termsok': { if (!S.acc || !S.terms) return; await api('POST', '/api/terms/accept', { version: S.terms.version }); S.user.terms_ok = true; S.screen = 'home'; syncAll(true); return render(); }
       case 'copycode': try { await navigator.clipboard.writeText(S.code); banner('Recovery code copied', 'ok', 1500); } catch (e) {} return;
       case 'codeok': { const nxt = S.codeNext; SS.del('bl_code'); S.code = ''; S.saved = false; if (nxt === 'home') { S.screen = 'home'; if (S.user) { const h = S.held; S.held = null; syncAll(true, h && h.changed); } } else if (nxt === 'auth') { S.screen = 'auth'; S.auth.tab = 'login'; S.msg = 'Password reset. Sign in with your new password.'; } else S.screen = nxt || 'home'; return render(); }
       case 'doquick': S.queued = true; tx({ t: 'quick', team: S.pick }) || (S.err = 'Not connected to the server.'); return render();
@@ -1042,21 +956,6 @@ function startMatch(m) {                                                   /* se
 function leaveMatchPage() { SS.del('bl_match'); const p = LS.get('bl_prev_gi3d'); if (p !== null) { if (p) LS.set('gi3d', p); else LS.del('gi3d'); LS.del('bl_prev_gi3d'); } if (S.ws) { S.noRetry = true; try { S.ws.close(); } catch (e) {} } (GI.reload ? GI.reload() : location.reload()); }
 let started = false, seq = 0, lastSnap = null, tgt = null, lastPoss = -1, lastScore = [0, 0], finalSent = false, hostBooted = false, panelsSig = '';
 const PANELS = ['select', 'subp', 'snapbar', 'coachTop', 'side'];
-let possHud = null;
-function ensurePossessionHud() {
-  if (!MATCH || possHud) return;
-  possHud = document.createElement('div'); possHud.id = 'bl-live-possession';
-  possHud.style.cssText = 'position:fixed;z-index:9998;top:12px;left:50%;transform:translateX(-50%);padding:8px 14px;border:1px solid rgba(255,255,255,.35);border-radius:999px;background:rgba(5,12,25,.86);color:#fff;font:800 12px/1.2 system-ui,sans-serif;letter-spacing:.08em;text-align:center;pointer-events:none;box-shadow:0 4px 18px rgba(0,0,0,.35);max-width:90vw;white-space:nowrap;';
-  document.body.appendChild(possHud);
-}
-function updatePossessionHud(snapshot) {
-  if (!MATCH) return; ensurePossessionHud();
-  const g = G(), team = snapshot ? snapshot.bt : (g && g.ballTeam);
-  const localTeam = MATCH.role === 'host' ? 0 : 1;
-  const yours = team === localTeam;
-  possHud.textContent = team === localTeam ? '🏈 YOUR TEAM HAS THE BALL' : '🏈 OPPONENT HAS THE BALL';
-  possHud.style.borderColor = yours ? '#7ee787' : '#ffcf70';
-}
 if (MATCH) {
   GI.online = true; GI.kgBlock = e => !!(MATCH.role === 'host' && started && G() && G().userTeam === 1 && e.isTrusted); { let prev = null; Object.defineProperty(GI, 'preStart', { configurable: true, get: () => o => { if (prev) prev(o); Object.assign(o, MATCH.set); GI.two = true; }, set: f => { prev = f; } }); }   /* chains after the game's own preStart hooks */                 /* host + guest share the engine's own 2-player turn model */
   const iv = setInterval(() => { const g = G(); if (!g) return; clearInterval(iv); g.paused = true; hostBooted = true; if (MATCH.role === 'guest') installGuest(); else installHost(); connect(); }, 50);
@@ -1070,12 +969,8 @@ function gate(e) {                                                          /* w
   else if (!myTurn) e.stopImmediatePropagation();
 }
 function matchNet(on) { if (!MATCH) return; if (on) { S.noRetry = false; if (!started) tx({ t: 'loaded' }); } }
-function markMatchActivity(e) { if (!MATCH || !started || (e && e.isTrusted === false)) return; tx({ t: 'activity' }); }
-document.addEventListener('keydown', markMatchActivity, true);
-document.addEventListener('pointerdown', markMatchActivity, true);
-document.addEventListener('touchstart', markMatchActivity, {capture:true,passive:true});
 function matchPeer(on) { const g = G(); if (!MATCH || !g || !started) return; if (MATCH.role === 'host') g.paused = !on; banner(on ? 'Opponent reconnected' : 'Opponent disconnected — waiting…', on ? 'ok' : 'err', on ? 2500 : 30000); }
-function matchBegin() { if (started) { const g = G(); if (g) g.paused = false; return; } const g = G(); if (!g) return; started = true; g.paused = false; if (MATCH.role === 'host') hostLoop(); updatePossessionHud(); banner('Match started — good luck!', 'ok', 2500); }
+function matchBegin() { started = true; const g = G(); g.paused = false; if (MATCH.role === 'host') hostLoop(); banner('Match started — good luck!', 'ok', 2500); }
 function endMatchLocal(why) { banner(why, 'err', 8000); ov.classList.add('on'); S.screen = 'result'; S.result = { winner: 'tie', score: G() ? G().score : [0, 0], reason: 'abandoned', recorded: false }; render(); }
 function matchResult() { setTimeout(() => { ov.classList.add('on'); S.screen = 'result'; render(); }, 1800); }
 const ix = p => p ? p.team * 11 + p.idx : -1, r2 = x => Math.round(x * 100) / 100, byIx = i => i < 0 ? null : G().players[(i / 11) | 0][i % 11];
@@ -1094,7 +989,6 @@ function hostLoop() {
   const iv = setInterval(() => {
     const g = G(); if (!g || S.result) return clearInterval(iv); if (!S.wsOK) return;
     const b = D().ball, P = g.players;
-    updatePossessionHud();
     tx({ t: 'rl', d: { k: 'snap', n: ++seq, ph: g.phase, q: g.qtr, cl: r2(g.clock), sc: g.score, po: g.poss, ut: g.userTeam, los: g.los, dn: g.down, tg: g.toGo, bt: g.ballTeam, fx: r2(g.fx), fz: r2(g.fz), ex: r2(g.exc), to: g.to, ch: g.chal, st: g.st, ct: ix(g.ctrl), ca: ix(g.carrier), cam: g.camMode,
       bl: [r2(b.x), r2(b.y), r2(b.z), r2(b.vx), r2(b.vy), r2(b.vz), b.state, ix(b.holder)],
       p: P.map(t => t.map(p => [r2(p.x), r2(p.z), r2(p.vx), r2(p.vz), r2(p.yaw), p.state, p.task || '', r2(p.jump || 0), p.carry ? 1 : 0, p.sub ? 1 : 0])) } });
@@ -1115,70 +1009,22 @@ function installGuest() {
   };
   PANELS.forEach(id => { const e = $(id); if (e) e.addEventListener('click', ev => { const bs = [...e.querySelectorAll('button')], i = bs.indexOf(ev.target.closest('button')); if (i >= 0 && G().userTeam === 1) tx({ t: 'rl', d: { k: 'ui', id, i } }); else if (id === 'coachTop') tx({ t: 'rl', d: { k: 'ui', id, i: -2 } }); }, true); });
 }
-const BAD_TAGS = 'script,iframe,frame,frameset,object,embed,applet,link,meta,base';
-function safeHTML(html) {                                      /* the host's browser sends HTML for the guest to render: strip anything script-capable */
-  const t = document.createElement('template'); t.innerHTML = String(html);
-  t.content.querySelectorAll(BAD_TAGS).forEach(n => n.remove());
-  t.content.querySelectorAll('*').forEach(n => { for (const a of Array.from(n.attributes)) { const nm = a.name.toLowerCase(), v = a.value.replace(/[\s\u0000-\u001f]+/g, '').toLowerCase();
-    if (nm.startsWith('on') || nm === 'srcdoc' || (/^(href|src|xlink:href|action|formaction)$/.test(nm) && /^(javascript:|vbscript:|data:text\/html)/.test(v))) n.removeAttribute(a.name); } });
-  const d = document.createElement('div'); d.appendChild(t.content); return d.innerHTML;
-}
 function matchRelay(d) {
   const g = G(); if (!g) return;
-  if (d.k === 'tossLock' && MATCH.role === 'guest') {
-    const toss = $('toss');
-    if (toss) {
-      const buttons = [...toss.querySelectorAll('#tbtn button')];
-      buttons.forEach(b => { b.disabled = true; b.style.opacity = '.45'; b.style.cursor = 'not-allowed'; });
-      const sub = toss.querySelector('#tsub');
-      if (sub) {
-        const chosen = d.choice === 'TAILS' ? 'TAILS' : 'HEADS';
-        const other = chosen === 'HEADS' ? 'TAILS' : 'HEADS';
-        sub.textContent = (d.role === 'guest' ? 'GUEST' : 'HOST') + ' called ' + chosen + ' — the other player is locked to ' + other + '. The coin is in the air...';
-      }
-    }
-    return;
-  }
-  /* The guest's coin-toss panel is mirrored HTML, so its original button handlers do not exist.
-     Route a guest's choice to the host simulation, which owns the real match state. */
-  if (d.k === 'toss' && MATCH.role === 'host' && started && g.phase === 'toss') {
-    const wanted = d.choice === 'TAILS' ? 'TAILS' : 'HEADS';
-    const toss = $('toss'), buttons = toss ? [...toss.querySelectorAll('#tbtn button')] : [];
-    const button = buttons.find(b => b.textContent.trim().toUpperCase() === wanted);
-    if (button) { window.__BL_TOSS_CALLER = 'guest'; button.click(); }
-    return;
-  }
-  if (d.k === 'snap' && MATCH.role === 'guest') { if (lastSnap && d.n <= lastSnap) return; lastSnap = d.n; tgt = d; updatePossessionHud(d); }
+  if (d.k === 'snap' && MATCH.role === 'guest') { if (lastSnap && d.n <= lastSnap) return; lastSnap = d.n; tgt = d; }
   else if (d.k === 'pnl' && MATCH.role === 'guest') {
-    for (const id in d.m) { const e = $(id); if (e) { { const h = safeHTML(d.m[id][0]); if (e.innerHTML !== h) e.innerHTML = h; } e.classList.toggle('hide', !!d.m[id][1]); } }
-    { let k = $('kgm'); if (!d.kgm) { if (k) k.remove(); } else { if (!k) { k = document.createElement('div'); k.id = 'kgm'; document.body.appendChild(k); k.onpointerdown = () => { if (G() && G().userTeam === 1) { tx({ t: 'rl', d: { k: 'inp', e: 'd', c: 'Space' } }); tx({ t: 'rl', d: { k: 'inp', e: 'u', c: 'Space' } }); } }; } k.style.cssText = d.kgm[0]; { const h = safeHTML(d.kgm[1]); if (k.innerHTML !== h) k.innerHTML = h; } } }
-    { let t = $('toss'); if (!d.tos) { if (t) t.remove(); } else { if (!t) { t = document.createElement('div'); t.id = 'toss'; document.body.appendChild(t); } t.style.cssText = d.tos[0]; { const h = safeHTML(d.tos[1]); if (t.innerHTML !== h) t.innerHTML = h; } } }
+    for (const id in d.m) { const e = $(id); if (e) { if (e.innerHTML !== d.m[id][0]) e.innerHTML = d.m[id][0]; e.classList.toggle('hide', !!d.m[id][1]); } }
+    { let k = $('kgm'); if (!d.kgm) { if (k) k.remove(); } else { if (!k) { k = document.createElement('div'); k.id = 'kgm'; document.body.appendChild(k); k.onpointerdown = () => { if (G() && G().userTeam === 1) { tx({ t: 'rl', d: { k: 'inp', e: 'd', c: 'Space' } }); tx({ t: 'rl', d: { k: 'inp', e: 'u', c: 'Space' } }); } }; } k.style.cssText = d.kgm[0]; if (k.innerHTML !== d.kgm[1]) k.innerHTML = d.kgm[1]; } }
+    { let t = $('toss'); if (!d.tos) { if (t) t.remove(); } else { if (!t) { t = document.createElement('div'); t.id = 'toss'; document.body.appendChild(t); } t.style.cssText = d.tos[0]; if (t.innerHTML !== d.tos[1]) t.innerHTML = d.tos[1]; } }
     const b = $('banner'), c = $('comm'); if (b && d.ban) { const h = b.querySelector('h1'), p = b.querySelector('p'); if (h) h.textContent = d.ban[0]; if (p) p.textContent = d.ban[1]; b.className = d.ban[2]; } if (c && d.com) { c.textContent = d.com[0]; c.className = d.com[1]; }
   }
   else if (d.k === 'inp' && MATCH.role === 'host' && g.userTeam === 1 && started) { const ks = D().keys; if (typeof d.c !== 'string' || !/^[A-Za-z0-9]{1,12}$/.test(d.c)) return; const ev = new KeyboardEvent(d.e === 'd' ? 'keydown' : 'keyup', { code: d.c, key: d.c, bubbles: true, cancelable: true }); ev.__bl = true; window.dispatchEvent(ev); }
   else if (d.k === 'ui' && MATCH.role === 'host' && started && PANELS.includes(d.id) && g.userTeam === 1) { const e = $(d.id); if (!e) return; if (d.i === -2) e.click(); else { const bs = e.querySelectorAll('button'); if (bs[d.i]) bs[d.i].click(); } }
 }
-if (MATCH) {
-  /* Both clients announce their toss choice to the server. The server accepts only
-     the first choice, locks the mirrored panel, and routes guest choices to the host's
-     authoritative game engine. Host clicks still run the original game handler. */
-  document.addEventListener('click', e => {
-    if (!started || !S.wsOK) return;
-    const button = e.target && e.target.closest ? e.target.closest('#toss #tbtn button') : null;
-    if (!button) return;
-    const choice = button.textContent.trim().toUpperCase();
-    if (choice !== 'HEADS' && choice !== 'TAILS') return;
-    tx({ t: 'rl', d: { k: 'toss', choice } });
-    if (MATCH.role === 'guest') {
-      e.preventDefault(); e.stopPropagation();
-      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-    }
-  }, true);
-  window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(1000); } catch (e) {} });
-}
+if (MATCH) window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(1000); } catch (e) {} });
 
 /* ---------- boot ---------- */
-GI.online = GI.online || false; window.BlitzOnline = { open: openOnline, state: S, safeHTML, diag: DIAG, retryDelay, MAX_ATTEMPTS };
+GI.online = GI.online || false; window.BlitzOnline = { open: openOnline, state: S };
 initAuth().catch(e => { S.err = friendly(e); }); if (MATCH) { /* connect happens after the engine is ready */ }
 })();
 
@@ -4313,17 +4159,16 @@ const tint=(c,t,b)=>new T.Color(b).lerp(new T.Color(c),t).getStyle();
    RENDERER / SCENE
 ============================================================ */
 const canvas=$('c');
-const LOW_POWER = !!((navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) || (navigator.deviceMemory && navigator.deviceMemory <= 4));
-const renderer=new T.WebGLRenderer({canvas,antialias:!LOW_POWER,powerPreference:'high-performance'});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,LOW_POWER?1:1.5));
-renderer.shadowMap.enabled=!LOW_POWER;
+const renderer=new T.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.75));
+renderer.shadowMap.enabled=true;
 renderer.shadowMap.type=T.PCFSoftShadowMap;
 const scene=new T.Scene();
 const camera=new T.PerspectiveCamera(30,1,0.5,1200);window.GI.eng={scene,T,camera,renderer};
 
 const hemi=new T.HemisphereLight(0xffffff,0x335533,1);scene.add(hemi);
 const sun=new T.DirectionalLight(0xffffff,1);
-sun.castShadow=!LOW_POWER;sun.shadow.mapSize.set(LOW_POWER?512:1024,LOW_POWER?512:1024);
+sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
 Object.assign(sun.shadow.camera,{left:-42,right:42,top:42,bottom:-42,near:1,far:240});
 sun.shadow.bias=-0.0004;
 scene.add(sun,sun.target);
@@ -5170,7 +5015,7 @@ function countStep(dt){
   c.i++;
   $('cnt').textContent=c.i>=c.n?'HIKE!':String(c.i)+'...';
   const m=CH();
-  if(m&&G.poss===G.userTeam&&Math.random()<(c.i===1?0.004:0.03)*m){ // a defender bites on the cadence
+  if(m&&G.poss===G.userTeam&&Math.random()<rdBite(c,m)){ // a defender bites on the cadence
     const p=G.defs[Math.floor(rnd(0,4))];G.cnt=null;p.z-=dirOf(G.poss)*1.1;
     callPenalty({name:'Offside',team:1-G.poss,yards:5,side:'def'},p.x,p.z);return;
   }
@@ -5475,11 +5320,92 @@ function aiOffPlay(){
   const want=Math.random()<pp?'pass':'run';
   return pick(PLAYS.filter(p=>p.type===want));
 }
+/* ---------- defensive scouting: the CPU defense learns your tendencies ---------- */
+const RD_TAB=[0,0,.15,.45,.8,1];
+function rdHist(){return G.rdH||(G.rdH=[]);}
+function rdExpect(){
+  const h=rdHist(),sc=[0.6,1,1.25][G.diff||0],last=h[h.length-1];
+  let st=0,cs=0,alt=0;
+  if(last){
+    for(let i=h.length-1;i>=0&&h[i].t===last.t;i--)st++;
+    for(let i=h.length-1;i>=0&&h[i].n===last.n;i--)cs++;
+    const r=h.slice(-5);for(let i=1;i<r.length;i++)if(r[i].t!==r[i-1].t)alt++;
+  }
+  return{t:last?last.t:null,s:last?Math.min(1,RD_TAB[Math.min(st,5)]*sc):0,streak:st,
+    n:last?last.n:0,k:cs>=2?Math.min(1,[0,0,.45,.8,1][Math.min(cs,4)]*sc):0,mix:alt>=3};
+}
+function rdDefPick(by,long){
+  if(G.poss!==G.userTeam)return null;
+  const e=rdExpect();if(!e.t||e.s<=0||Math.random()>e.s*0.9)return null;
+  let a;
+  if(e.t==='run'){
+    if(long)return null;
+    a=[by('blitz'),by('zoneblitz'),by('sblitz'),by('zone')];
+    if(e.s>=0.8)a.push(by('goalline'),by('goalline'));
+  }else{
+    a=[by('cover2'),by('cover3'),by('cover1'),by('cover2'),by('cover3')];
+    if(long)a.push(by('prevent'));
+  }
+  a=a.filter(Boolean);return a.length?pick(a):null;
+}
+function rdBite(c,m){
+  let b=c.i===1?0.004:0.03;const e=rdExpect();
+  if(e.k>0){
+    if(c.n===e.n||c.i<e.n)b*=0.15;       /* they know your count: they wait for it */
+    else if(c.i===e.n)b=0.03+0.22*e.k;   /* you went later than they expected: they jump early */
+  }
+  return Math.min(0.4,b*m);
+}
+function rdSnap(play){
+  G.rdDelay=0;G.rdBoost=1;G.rdMode=null;G.rdWrong=null;G.rdS=0;
+  if(G.poss!==G.userTeam||(play.type!=='run'&&play.type!=='pass'))return;
+  const e=rdExpect(),n=G.hike,tp=play.type;let delay=0,boost=1,msg=null;
+  if(e.t&&e.s>0.1){
+    if(e.t===tp){boost=1+0.07*e.s;G.rdMode='read';G.rdS=e.s;
+      if(e.s>=0.45)msg=['THEY READ IT','Defense is keying on the '+tp,'bad'];}
+    else{delay+=0.18+0.7*e.s;G.rdMode='fooled';G.rdWrong=e.t;G.rdS=e.s;
+      if(e.s>=0.45)msg=['CAUGHT GUESSING','They were sitting on the '+e.t,'good'];}
+  }else if(e.mix)delay+=0.16;
+  if(e.k>0){
+    if(n===e.n)boost*=1+0.04*e.k;
+    else if(n<e.n){delay+=0.25+0.35*e.k;msg=['LATE JUMP','Defense was timing the count on '+e.n,'good'];}
+    else delay+=0.12*e.k;
+  }
+  G.rdDelay=Math.min(1.1,delay);G.rdBoost=boost;
+  const h=rdHist();h.push({t:tp,n:n});if(h.length>8)h.shift();
+  if(msg)banner(msg[0],msg[1],msg[2],1700);
+}
+function rdCush(){return(G.rdMode==='read'&&G.play&&G.play.type==='pass')?1-0.3*G.rdS:1;}
+function rdOn(){return G.poss===G.userTeam&&G.phase==='live'&&G.play&&(G.play.type==='run'||G.play.type==='pass')&&G.play.form!=='ret'&&!G.twoPt;}
+function rdThink(p,dt){
+  if(!rdOn()||p.team===G.poss)return false;
+  const tk=p.task;if(tk!=='rush'&&tk!=='man'&&tk!=='zone'&&tk!=='pursue')return false;
+  const d=dirOf(G.poss),sp=p.sp*G.cpuSpd;
+  if(G.t<G.rdDelay){
+    const w=G.rdWrong;
+    if(!w){p.dvx=p.dvz=0;return true;}                                  /* late off the ball */
+    if(tk==='rush')return false;                                        /* slowed in rdApply */
+    if(w==='run')want(p,p.x,p.z-d*2.5,sp*0.75);                         /* bit on the run: crashing the line */
+    else want(p,p.x,p.z+d*2,sp*0.45);                                   /* bit on the pass: dropping back */
+    return true;
+  }
+  if(G.rdMode==='read'&&G.play.type==='run'&&G.rdS>=0.45&&(tk==='zone'||tk==='man')&&G.t>(G.rdS>=0.8?0.2:0.35)){
+    const i=G.defs.indexOf(p);
+    if(i===4||i===6||i===10||(G.rdS>=0.8&&(i===5||i===9)))p.task='pursue';   /* they read run: linebackers flow to the ball */
+  }
+  return false;
+}
+function rdApply(p){
+  if(!rdOn()||p.team===G.poss)return;
+  if(G.t<G.rdDelay){if(p.task==='rush'){p.dvx*=0.35;p.dvz*=0.35;}}
+  else if(G.rdBoost>1){p.dvx*=G.rdBoost;p.dvz*=G.rdBoost;}
+}
 function aiDefCall(){
   const r=Math.random(),long=G.toGo>12,d=dirOf(G.poss),ytg=GOAL-G.los*d;
   const by=id=>DEFS.find(x=>x.id===id);
   if(window.GI.defPick){const dp=window.GI.defPick();if(dp&&by(dp))return by(dp);}
   if(ytg<=3||G.toGo<=1)return r<0.6?by('goalline'):by('blitz');
+  {const rdp=rdDefPick(by,long);if(rdp)return rdp;}
   if(long)return pick([by('prevent'),by('cover3'),by('cover2'),by('zone'),by('zoneblitz')]);
   return pick([by('zone'),by('cover2'),by('cover3'),by('cover1'),by('blitz'),by('zoneblitz'),by('cbblitz'),by('sblitz'),by('cover0')]);
 }
@@ -5645,9 +5571,10 @@ function snap(){
     else{const cr=play.carrier||'RB';p.task=r===cr?'mesh':'br';p.mark=null;if(r===cr)p.hole=[play.hole[0],G.los+d*play.hole[1]];}
   });
   const c=G.defCall;
+  rdSnap(play);
   defs.forEach((p,i)=>{p.mark=null;p.cov=null;p.noEng=0;p.tt=null;
     if(c.rush.includes(i))p.task='rush';
-    else if(c.man[i]){p.task='man';p.cov=O[c.man[i]];p.cush=c.cush;}
+    else if(c.man[i]){p.task='man';p.cov=O[c.man[i]];p.cush=c.cush*rdCush();}
     else if(c.zone[i]){p.task='zone';p.zx=c.zone[i][0];p.zz=G.los+d*c.zone[i][1];}
     else{p.task='zone';p.zx=p.x;p.zz=p.z+d*2;}
   });
@@ -5758,7 +5685,8 @@ function checkStall(dt){
     }
   }
 }
-function think(p,dt){
+function think(p,dt){if(rdThink(p,dt))return;thinkBase(p,dt);rdApply(p);}
+function thinkBase(p,dt){
   const d=dirOf(p.team),sp=p.sp*(p.team===G.userTeam?1:G.cpuSpd);
   let m;
   switch(p.task){
@@ -6906,6 +6834,7 @@ function updateOverlays(){
    START / INTRO / LOOP
 ============================================================ */
 function startGame(){
+  G.rdH=[];G.rdDelay=0;G.rdBoost=1;G.rdMode=null;G.rdWrong=null;G.rdS=0;
   initAudio();
   if(window.GI.preStart)window.GI.preStart(OPTS);
   const q0=window.GI.rtgOn?Math.min(OPTS.q,180):OPTS.q;G.qLen=q0;G.clock=q0;G.diff=OPTS.diff;G.cpuSpd=[0.92,1,1.06][OPTS.diff];G.tackleCPU=[0.5,0.62,0.74][OPTS.diff];G.env=OPTS.time;
@@ -6995,12 +6924,7 @@ function startToss(){
     startKickoff(rcv);
   };
   const call=(c)=>{
-    /* The first valid click wins; immediately remove both choices to lock the call. */
-    if (!tb.querySelector('button')) return;
-    const caller = window.__BL_TOSS_CALLER === 'guest' ? 'GUEST' : 'HOST';
-    window.__BL_TOSS_CALLER = null;
-    const chosen = c === 'H' ? 'HEADS' : 'TAILS', opposite = c === 'H' ? 'TAILS' : 'HEADS';
-    tb.innerHTML='';sub.textContent=caller+' called '+chosen+' — the other player is locked to '+opposite+'. The coin is in the air...';
+    tb.innerHTML='';sub.textContent='The coin is in the air...';
     const heads=Math.random()<0.5;
     coin.style.transform='rotateY(1800deg)';
     setTimeout(()=>{
@@ -7076,7 +7000,7 @@ G.defCall=DEFS[0];lineUp('under');updateMarkers();
 
 let last=performance.now(),tAcc=0,sbT=0;
 var shake=0;const WX={p:null,k:''};
-function updateWx(dt){const w=window.GI.wx||'';if(w!==WX.k){if(WX.p){scene.remove(WX.p);WX.p=null;}WX.k=w;if(w){const n=LOW_POWER?(w==='rain'?900:650):(w==='rain'?2200:1500),g=new T.BufferGeometry(),a=new Float32Array(n*3);for(let i=0;i<n;i++){a[i*3]=rnd(-45,45);a[i*3+1]=rnd(0,40);a[i*3+2]=rnd(-45,45);}g.setAttribute('position',new T.BufferAttribute(a,3));WX.p=new T.Points(g,new T.PointsMaterial({color:w==='rain'?0xaac4ff:0xffffff,size:w==='rain'?0.13:0.26,transparent:true,opacity:0.85}));WX.p.frustumCulled=false;scene.add(WX.p);hemi.intensity*=0.82;}}
+function updateWx(dt){const w=window.GI.wx||'';if(w!==WX.k){if(WX.p){scene.remove(WX.p);WX.p=null;}WX.k=w;if(w){const n=w==='rain'?3200:2200,g=new T.BufferGeometry(),a=new Float32Array(n*3);for(let i=0;i<n;i++){a[i*3]=rnd(-45,45);a[i*3+1]=rnd(0,40);a[i*3+2]=rnd(-45,45);}g.setAttribute('position',new T.BufferAttribute(a,3));WX.p=new T.Points(g,new T.PointsMaterial({color:w==='rain'?0xaac4ff:0xffffff,size:w==='rain'?0.13:0.26,transparent:true,opacity:0.85}));WX.p.frustumCulled=false;scene.add(WX.p);hemi.intensity*=0.82;}}
 if(!WX.p)return;const a=WX.p.geometry.attributes.position.array,v=w==='rain'?30:4,t=performance.now()/1000;WX.p.position.set(camera.position.x,0,camera.position.z);
 for(let i=0;i<a.length;i+=3){a[i+1]-=v*dt;if(w==='snow')a[i]+=Math.sin(t+i)*dt*0.8;if(a[i+1]<0)a[i+1]=40;}WX.p.geometry.attributes.position.needsUpdate=true;}
 const R={rec:[],on:false,i:0,prev:'',acc:0,d:1,sv:null,sc:0};
